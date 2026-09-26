@@ -1,9 +1,8 @@
 # agents/tasks/__init__.py
 """
-Podcast Analysis Tasks Package
+Meeting Analysis Tasks Package
 
-This package contains task definitions for different types of
-podcast analysis operations.
+This package contains task definitions for the steps that produce meeting minutes.
 """
 
 from agents.tasks.task_base import BaseTask

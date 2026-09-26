@@ -1,177 +1,191 @@
 # crews/base_crew.py
 import json
-import os
-from crewai import Crew
-from agents.registry import get_agent, set_default_model, get_all_agents
-from utils.result_parser import parse_crew_result
+import logging
+import re
+import sys
+
+from crewai import Crew, Process
+from pydantic import ValidationError
+
+from agents.registry import get_agent
+from api.llm import AllModelsUnavailable, chat
+from utils.config import get_default_model, is_debug
+
+logger = logging.getLogger(__name__)
+
+
+class AnalysisError(Exception):
+    """Raised when the crew could not produce usable results"""
+
+
+def make_console_output_safe():
+    """
+    Stop console encoding errors from aborting a crew run
+
+    CrewAI prints emoji status lines even with verbose off. On Windows, when output
+    goes to a pipe or a legacy code page (cp1252), printing them raises
+    UnicodeEncodeError; replacing unencodable characters avoids that.
+    """
+    tolerant = {"replace", "backslashreplace", "ignore", "xmlcharrefreplace", "namereplace"}
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if encoding.startswith("utf") or getattr(stream, "errors", None) in tolerant:
+            continue
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
+def describe_failure(error, failed="The AI analysis failed"):
+    """A readable message for a failed LLM run, calling out free-tier rate limits"""
+    text = str(error)
+    if isinstance(error, AllModelsUnavailable) or "All Gemini models are unavailable" in text:
+        return (f"{text}. Busy models usually recover within a few minutes, and daily free quotas "
+                "reset every 24 hours. Please try again shortly.")
+    if "PerDay" in text:
+        return ("Gemini's free daily quota is used up for every configured model. It resets daily; "
+                "try again later, or add models to GEMINI_FALLBACK_MODELS.")
+    if any(marker in text for marker in ("429", "RESOURCE_EXHAUSTED", "RateLimit", "rate limit", "quota")):
+        return ("Gemini's free-tier rate limit was reached. Wait a minute and try again, "
+                "or pick the lighter model in the sidebar.")
+    return f"{failed}: {text}"
+
+
+def parse_model(text, model_cls):
+    """
+    The JSON object in `text` (ignoring code fences and surrounding prose) as model_cls
+
+    Returns:
+        BaseModel|None
+    """
+    match = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not match:
+        return None
+    try:
+        return model_cls.model_validate_json(match.group(0))
+    except ValidationError:
+        return None
+
+
+def structured_output(task, model_cls):
+    """
+    The task's answer parsed as model_cls
+
+    Returns:
+        BaseModel|None: Parsed result, or None if the answer does not fit the schema
+    """
+    output = getattr(task, "output", None)
+    if output is None:
+        return None
+    result = parse_model(output.raw, model_cls)
+    if result is None:
+        logger.warning("Task output did not match %s: %.300s", model_cls.__name__, output.raw)
+    return result
+
+
+def repair_output(raw, model_cls, model=None):
+    """
+    One LLM request that rewrites an answer to fit the schema
+
+    Returns:
+        BaseModel|None: The repaired result, or None if that fails too
+    """
+    if not (raw or "").strip():
+        return None
+    schema = json.dumps(model_cls.model_json_schema(), separators=(",", ":"))
+    prompt = (
+        "Rewrite the text below as a single JSON object matching this JSON schema. Keep all of its "
+        "information; only fix the structure and use the allowed values. Return only the JSON.\n\n"
+        f"SCHEMA:\n{schema}\n\nTEXT:\n{raw}"
+    )
+    try:
+        return parse_model(chat([{"role": "user", "content": prompt}], model=model), model_cls)
+    except Exception as e:  # a failed repair leaves the section empty rather than failing the analysis
+        logger.warning("Could not repair %s output: %s", model_cls.__name__, e)
+        return None
+
+
+def output_or_repair(task, model_cls, model=None):
+    """The task's parsed answer, repairing it with one extra request if it does not fit the schema"""
+    result = structured_output(task, model_cls)
+    output = getattr(task, "output", None)
+    if result is None and output is not None:
+        result = repair_output(output.raw, model_cls, model)
+    return result
+
 
 class BaseCrew:
-    """Base class for Meeting analysis crews"""
-    
-    def __init__(self, model="gpt-4o"):
+    """Base class for meeting analysis crews"""
+
+    def __init__(self, model=None):
         """
-        Initialize a base crew
-        
         Args:
-            model: LLM model to use for all agents
+            model: Gemini model used by every agent in the crew (defaults to GEMINI_MODEL)
         """
-        self.model = model
-        self.agents = {}
-        self.tasks = []
-        
-        # Set the default model for all agents
-        set_default_model(model)
-    
-    def add_agent(self, agent_id):
+        self.model = model or get_default_model()
+        self._agents = {}
+
+    def agent(self, agent_id):
+        """This crew's instance of an agent (one per crew, so concurrent crews never share agents)"""
+        if agent_id not in self._agents:
+            self._agents[agent_id] = get_agent(agent_id, model=self.model)
+        return self._agents[agent_id]
+
+    def kickoff(self, steps, progress=None):
         """
-        Add an agent to the crew
-        
+        Run steps sequentially
+
         Args:
-            agent_id: ID of the agent to add
-            
-        Returns:
-            BaseCrew: Self for chaining
+            steps: [(label, task)] in execution order
+            progress: Optional callback(completed_count, total, label) called after each step
         """
-        if agent_id not in self.agents:
-            agent = get_agent(agent_id)
-            self.agents[agent_id] = agent
-        
-        return self
-    
-    def add_task(self, task):
-        """
-        Add a task to the crew
-        
-        Args:
-            task: Task to add
-            
-        Returns:
-            BaseCrew: Self for chaining
-        """
-        self.tasks.append(task)
-        return self
-    
-    def run(self):
-        """
-        Run the crew with all configured agents and tasks
-        
-        Returns:
-            str: JSON string with results
-        """
+        tasks = [task for _, task in steps]
+        agents = list({id(task.agent): task.agent for task in tasks}.values())
+        completed = {"count": 0}
+
+        def on_task_done(_output):
+            completed["count"] += 1
+            if progress:
+                index = completed["count"]
+                try:
+                    progress(index, len(steps), steps[index - 1][0])
+                except Exception:  # a UI hiccup must not abort the analysis
+                    logger.exception("Progress callback failed")
+
+        crew = Crew(
+            agents=agents,
+            tasks=tasks,
+            process=Process.sequential,
+            verbose=is_debug(),
+            task_callback=on_task_done,
+        )
         try:
-            # Create CrewAI agent instances for all agents
-            crew_agents = [agent.create_agent() for agent in self.agents.values()]
-            
-            # Create and run the crew
-            crew = Crew(
-                agents=crew_agents,
-                tasks=self.tasks,
-                verbose=True
-            )
-            
-            # Run the analysis
-            result = crew.kickoff()
-            
-            # Handle the result type
-            if hasattr(result, 'raw_output'):
-                raw_result = result.raw_output  # CrewOutput with raw_output
-            elif hasattr(result, '__str__'):
-                raw_result = str(result)  # Stringable object
-            else:
-                raw_result = "Failed to extract raw result from crew output"
-            
-            # Save raw result for debugging
-            self._save_debug_output(raw_result)
-            
-            # Parse and structure the results
-            structured_result = self._structure_results(raw_result)
-            
-            # Return as JSON string
-            return json.dumps(structured_result)
-            
+            make_console_output_safe()
+            return crew.kickoff()
         except Exception as e:
-            print(f"Error in crew execution: {str(e)}")
-            
-            # Return fallback result
-            fallback_result = {
-                "error": True,
-                "message": f"The analysis encountered an error: {str(e)}",
-                "summary": "The analysis could not be completed due to an error.",
-                "key_topics": ["Error occurred", "Analysis incomplete"],
-                "sentiment_analysis": "Sentiment analysis could not be completed.",
-                "action_items": ["Try again with different settings", "Check agent configuration"]
-            }
-            
-            return json.dumps(fallback_result)
-    
-    def _save_debug_output(self, raw_result):
-        """
-        Save raw result for debugging
-        
-        Args:
-            raw_result: Raw result string from CrewAI
-        """
-        debug_dir = "debug_output"
-        if not os.path.exists(debug_dir):
-            os.makedirs(debug_dir)
-        
-        with open(os.path.join(debug_dir, "raw_crew_result.txt"), "w", encoding="utf-8") as f:
-            f.write(raw_result)
-        
-        print(f"Raw result from crew (first 500 chars): {raw_result[:500]}...")
-    
-    def _structure_results(self, raw_result):
-        """
-        Structure the raw results from the crew into a clean format
-        
-        Args:
-            raw_result: Raw result string from CrewAI
-            
-        Returns:
-            dict: Structured results
-        """
-        try:
-            # Parse the crew result
-            structured_result = parse_crew_result(raw_result)
-            
-            # Validate results
-            self._validate_results(structured_result)
-            
-            return structured_result
-            
-        except Exception as e:
-            print(f"Error in _structure_results: {e}")
-            
-            # Create a fallback structure for the results
-            fallback_result = {
-                "error": True,
-                "message": f"Result parsing error: {str(e)}",
-                "summary": "The analysis could not be properly structured due to an error in processing.",
-                "key_topics": ["Error in topic extraction", "Please check the agent configuration"],
-                "sentiment_analysis": "Sentiment analysis could not be structured properly.",
-                "action_items": ["Review the transcript format", "Check agent configuration"]
-            }
-            
-            return fallback_result
-    
-    def _validate_results(self, structured_result):
-        """
-        Validate the structured results and log warnings for missing data
-        
-        Args:
-            structured_result: Structured results dictionary
-        """
-        validation_fields = [
-            ("summary", "Summary is empty after parsing"),
-            ("key_topics", "Key topics list is empty after parsing"),
-            ("sentiment_analysis", "Sentiment analysis is empty after parsing"),
-            ("action_items", "Action items list is empty after parsing")
-        ]
-        
-        for field, warning in validation_fields:
-            if not structured_result.get(field):
-                print(f"Warning: {warning}")
-                
-            # For list fields, check if they're empty lists
-            if field in structured_result and isinstance(structured_result[field], list) and not structured_result[field]:
-                print(f"Warning: {warning}")
+            logger.exception("Crew run failed")
+            raise AnalysisError(describe_failure(e)) from e
+
+
+def run_single_task(agent, task, model_cls):
+    """
+    Run one task on its own and return its structured result
+
+    Args:
+        agent: BaseAgent that owns the task
+        task: CrewAI task
+        model_cls: Expected Pydantic model
+
+    Returns:
+        BaseModel|None
+    """
+    crew = Crew(agents=[agent.create_agent()], tasks=[task], process=Process.sequential, verbose=is_debug())
+    try:
+        make_console_output_safe()
+        crew.kickoff()
+    except Exception as e:
+        logger.exception("Single-task run failed")
+        raise AnalysisError(describe_failure(e)) from e
+    return output_or_repair(task, model_cls, agent.model)

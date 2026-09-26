@@ -1,96 +1,88 @@
 # api/assemblyai.py
+import logging
+
 import assemblyai as aai
+
 from utils.config import get_assemblyai_api_key
+from utils.transcript import format_utterances
 
-def initialize_assemblyai():
-    """Initialize AssemblyAI client with API key"""
-    api_key = get_assemblyai_api_key()
-    aai.settings.api_key = api_key
-    return api_key
+logger = logging.getLogger(__name__)
 
-def transcribe_podcast(audio_file_path):
+# File types AssemblyAI accepts that are common for meeting recordings
+AUDIO_VIDEO_TYPES = ["mp3", "wav", "m4a", "mp4", "mov", "webm", "ogg", "flac", "aac", "mkv"]
+
+# Personal data to redact when PII redaction is on. Person names are deliberately kept,
+# otherwise attendees and action item owners could not be identified.
+PII_POLICIES = [
+    aai.PIIRedactionPolicy.phone_number,
+    aai.PIIRedactionPolicy.email_address,
+    aai.PIIRedactionPolicy.credit_card_number,
+    aai.PIIRedactionPolicy.credit_card_cvv,
+    aai.PIIRedactionPolicy.credit_card_expiration,
+    aai.PIIRedactionPolicy.banking_information,
+    aai.PIIRedactionPolicy.us_social_security_number,
+    aai.PIIRedactionPolicy.passport_number,
+    aai.PIIRedactionPolicy.drivers_license,
+    aai.PIIRedactionPolicy.password,
+]
+
+
+class TranscriptionError(Exception):
+    """Raised when AssemblyAI cannot transcribe the recording"""
+
+
+def is_configured():
+    return bool(get_assemblyai_api_key())
+
+
+def transcribe_meeting(source, speakers_expected=None, detect_language=True, redact_pii=False):
     """
-    Transcribe a Meeting audio file using AssemblyAI
-    
+    Transcribe a meeting recording with speaker labels and timestamps
+
     Args:
-        audio_file_path: Path to the audio file
-        
+        source: Local file path or a public URL to the audio/video file
+        speakers_expected: Number of speakers if known (None lets AssemblyAI decide)
+        detect_language: Detect the spoken language instead of assuming English
+        redact_pii: Replace phone numbers, emails, card numbers etc. with placeholders
+
     Returns:
-        str: Transcription text
+        dict: {"text", "utterances", "language", "duration_seconds"}
     """
-    # Initialize the API
-    initialize_assemblyai()
-    
-    # Create a transcriber
-    transcriber = aai.Transcriber()
-    
-    # Transcribe the audio file
-    print(f"Transcribing audio file: {audio_file_path}")
-    transcript = transcriber.transcribe(audio_file_path)
-    
-    # Check if transcription was successful
-    if transcript.status == "completed":
-        return transcript.text
-    else:
-        error_msg = f"Transcription failed with status: {transcript.status}"
-        if hasattr(transcript, "error"):
-            error_msg += f" - Error: {transcript.error}"
-        raise Exception(error_msg)
-    
-def transcribe_with_speaker_diarization(audio_file_path):
-    """
-    Transcribe with speaker diarization (who said what)
-    
-    Args:
-        audio_file_path: Path to the audio file
-        
-    Returns:
-        dict: Transcription result with speaker labels
-    """
-    # Initialize the API
-    initialize_assemblyai()
-    
-    # Create a transcriber
-    transcriber = aai.Transcriber()
-    
-    # Configure transcription options
+    if not is_configured():
+        raise TranscriptionError("ASSEMBLYAI_API_KEY is not set")
+
+    aai.settings.api_key = get_assemblyai_api_key()
     config = aai.TranscriptionConfig(
         speaker_labels=True,
-        speakers_expected=2  # You can adjust this based on expected speakers
+        speakers_expected=speakers_expected or None,
+        language_detection=detect_language,
+        punctuate=True,
+        format_text=True,
     )
-    
-    # Transcribe the audio file
-    transcript = transcriber.transcribe(audio_file_path, config=config)
-    
-    # Return utterances with speaker information
-    return transcript.utterances
+    if redact_pii:
+        config.set_redact_pii(
+            policies=PII_POLICIES,
+            substitution=aai.PIISubstitutionPolicy.entity_name,
+        )
 
-def transcribe_with_topic_detection(audio_file_path):
-    """
-    Transcribe with automatic topic detection
-    
-    Args:
-        audio_file_path: Path to the audio file
-        
-    Returns:
-        dict: Transcription and detected topics
-    """
-    # Initialize the API
-    initialize_assemblyai()
-    
-    # Create a transcriber
-    transcriber = aai.Transcriber()
-    
-    # Configure transcription options with topic detection
-    config = aai.TranscriptionConfig(
-        auto_chapters=True  # This enables topic detection
-    )
-    
-    # Transcribe the audio file
-    transcript = transcriber.transcribe(audio_file_path, config=config)
-    
-    # Return the transcript and chapters (topics)
+    logger.info("Transcribing %s", source)
+    transcript = aai.Transcriber(config=config).transcribe(source)
+
+    if transcript.status == aai.TranscriptStatus.error:
+        raise TranscriptionError(transcript.error or "Unknown transcription error")
+    if not transcript.text:
+        raise TranscriptionError("No speech was detected in the recording")
+
+    utterances = [
+        {"speaker": f"Speaker {u.speaker}", "start_ms": u.start, "end_ms": u.end, "text": u.text}
+        for u in (transcript.utterances or [])
+    ]
+    if not utterances:
+        utterances = [{"speaker": None, "start_ms": None, "end_ms": None, "text": transcript.text}]
+
     return {
-        "text": transcript.text,
-        "chapters": transcript.chapters
+        "text": format_utterances(utterances),
+        "utterances": utterances,
+        "language": (transcript.json_response or {}).get("language_code"),
+        "duration_seconds": transcript.audio_duration,
     }

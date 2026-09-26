@@ -1,208 +1,182 @@
 # database/mongodb.py
-from pymongo import MongoClient
-from utils.config import get_mongodb_uri
+"""
+MongoDB storage for meetings.
 
-def get_mongodb_client():
+Document shape (collection "meetings"):
+    title, meeting_date (YYYY-MM-DD), created_at, updated_at, options, source,
+    transcript {text, utterances, language, duration_seconds, truncated},
+    minutes (models.MeetingMinutes), fact_check, research, translations, warnings
+
+Functions return plain dicts with the ObjectId exposed as a string "id".
+"""
+import logging
+from datetime import datetime, timezone
+
+from bson.errors import InvalidId
+from bson.objectid import ObjectId
+from pymongo import DESCENDING, MongoClient
+from pymongo.errors import PyMongoError
+
+from utils.config import get_mongodb_db_name, get_mongodb_uri
+
+logger = logging.getLogger(__name__)
+
+_client = None
+
+
+class DatabaseError(Exception):
+    """Raised when MongoDB is unreachable or an operation fails"""
+
+
+def get_client():
+    """Shared MongoClient (pymongo pools connections and is thread-safe)"""
+    global _client
+    if _client is None:
+        uri = get_mongodb_uri()
+        if not uri:
+            raise DatabaseError("MONGODB_URI is not set")
+        _client = MongoClient(uri, serverSelectionTimeoutMS=5000, tz_aware=True)
+    return _client
+
+
+def get_collection():
+    return get_client()[get_mongodb_db_name()]["meetings"]
+
+
+def ping():
     """
-    Get a MongoDB client instance with robust error handling for cloud connections
-    
+    Check the connection
+
     Returns:
-        MongoClient: MongoDB client
+        tuple: (ok, error message or None)
     """
-    uri = get_mongodb_uri()
-    
-    # For troubleshooting - hide password in log
-    debug_uri = uri
-    if uri and '@' in uri:
-        parts = uri.split('@')
-        auth_part = parts[0].split('://')
-        if len(auth_part) > 1:
-            debug_uri = f"{auth_part[0]}://****:****@{parts[1]}"
-    print(f"Connecting to MongoDB with URI: {debug_uri}")
-    
     try:
-        # The simplest, most reliable way to connect to MongoDB Atlas
-        client = MongoClient(uri)
-        # Test the connection
-        client.admin.command('ping')
-        print("MongoDB connection successful")
-        return client
-    except Exception as e:
-        print(f"MongoDB connection error: {e}")
-        
-        # Create a mock client for testing when cloud connection fails
-        print("Creating mock MongoDB client for testing")
-        
-        class MockMongoClient:
-            def __getitem__(self, key):
-                return MockMongoCollection()
-            
-        class MockMongoCollection:
-            def __getitem__(self, key):
-                return self
-            def find(self, *args, **kwargs):
-                return []
-            def find_one(self, *args, **kwargs):
-                return None
-            def insert_one(self, document):
-                class MockResult:
-                    inserted_id = "mock_id_12345"
-                return MockResult()
-        
-        return MockMongoClient()
+        get_client().admin.command("ping")
+        return True, None
+    except (PyMongoError, DatabaseError) as e:
+        return False, str(e)
 
-def get_podcast_collection():
-    """
-    Get the MongoDB collection for Meeting summaries
-    
-    Returns:
-        Collection: MongoDB collection
-    """
-    client = get_mongodb_client()
-    db = client["podcast_analytics"]
-    return db["summaries"]
 
-def store_podcast_data(podcast_data):
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _object_id(meeting_id):
+    try:
+        return ObjectId(meeting_id)
+    except (InvalidId, TypeError) as e:
+        raise DatabaseError(f"Invalid meeting id: {meeting_id}") from e
+
+
+def _to_public(doc):
+    if doc is None:
+        return None
+    doc = dict(doc)
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+
+def _run(operation, action):
+    try:
+        return operation()
+    except PyMongoError as e:
+        logger.exception("MongoDB error while %s", action)
+        raise DatabaseError(f"Database error while {action}: {e}") from e
+
+
+def create_meeting(meeting):
     """
-    Store Meeting data in MongoDB
-    
-    Args:
-        podcast_data: Dictionary containing Meeting data and analysis
-        
+    Insert a meeting
+
     Returns:
-        str: ID of the inserted document
+        str: The new meeting id
     """
-    collection = get_podcast_collection()
-    result = collection.insert_one(podcast_data)
+    doc = dict(meeting, created_at=_now(), updated_at=_now())
+    doc.pop("id", None)
+    result = _run(lambda: get_collection().insert_one(doc), "saving the meeting")
     return str(result.inserted_id)
 
-def get_podcast_by_id(podcast_id):
-    """
-    Retrieve Meeting data by ID
-    
-    Args:
-        podcast_id: ID of the Meeting document
-        
-    Returns:
-        dict: Meeting data or None if not found
-    """
-    from bson.objectid import ObjectId
-    
-    try:
-        collection = get_podcast_collection()
-        
-        # Check if podcast_id is a valid ObjectId
-        if ObjectId.is_valid(podcast_id):
-            return collection.find_one({"_id": ObjectId(podcast_id)})
-        else:
-            # If not a valid ObjectId, try to find by title
-            return collection.find_one({"title": podcast_id})
-    except Exception as e:
-        print(f"Error retrieving podcast by ID: {e}")
-        return None
 
-def get_podcast_by_title(title):
-    """
-    Retrieve Meeting data by title
-    
-    Args:
-        title: Title of the Meeting
-        
-    Returns:
-        dict: Meeting data or None if not found
-    """
-    try:
-        collection = get_podcast_collection()
-        result = collection.find_one({"title": title})
-        
-        # If no exact match, try case-insensitive search
-        if not result:
-            import re
-            regex = re.compile(f"^{re.escape(title)}$", re.IGNORECASE)
-            result = collection.find_one({"title": {"$regex": regex}})
-            
-        # If still no match, try partial match
-        if not result:
-            import re
-            regex = re.compile(f".*{re.escape(title)}.*", re.IGNORECASE)
-            result = collection.find_one({"title": {"$regex": regex}})
-            
-        return result
-    except Exception as e:
-        print(f"Error retrieving Meeting by title: {e}")
-        return None
+def get_meeting(meeting_id):
+    oid = _object_id(meeting_id)
+    return _to_public(_run(lambda: get_collection().find_one({"_id": oid}), "loading the meeting"))
 
-def get_all_podcasts():
-    """
-    Retrieve all Meeting data
-    
-    Returns:
-        list: List of all Meeting documents
-    """
-    try:
-        collection = get_podcast_collection()
-        return list(collection.find())
-    except Exception as e:
-        print(f"Error retrieving all Meetings: {e}")
-        return []
 
-def get_all_podcast_titles():
+def list_meetings():
     """
-    Retrieve all Meeting titles
-    
-    Returns:
-        list: List of all Meeting titles
-    """
-    try:
-        collection = get_podcast_collection()
-        results = collection.find({}, {"title": 1})
-        titles = [doc.get("title", f"Meeting {str(doc.get('_id', 'unknown'))}") for doc in results if doc.get("title")]
-        
-        # If no titles found, return mock data for testing
-        if not titles:
-            print("No Meeting titles found, returning mock data for testing")
-            return ["Sample Meeting 1", "Sample Meeting 2", "Sample Meeting 3"]
-            
-        return titles
-    except Exception as e:
-        print(f"Error retrieving Meeting titles: {e}")
-        # Return mock data for testing
-        return ["Sample Meeting 1", "Sample Meeting 2", "Sample Meeting 3"]
+    List meetings, newest meeting date first (without transcripts)
 
-def update_podcast_data(podcast_id, update_data):
-    """
-    Update Meeting data
-    
-    Args:
-        podcast_id: ID of the Meeting document
-        update_data: Dictionary containing fields to update
-        
     Returns:
-        bool: True if update was successful
+        list: [{"id", "title", "meeting_date", "created_at", "summary", "decision_count",
+                "action_item_count", "open_action_item_count"}]
     """
-    from bson.objectid import ObjectId
-    
-    collection = get_podcast_collection()
-    result = collection.update_one(
-        {"_id": ObjectId(podcast_id)},
-        {"$set": update_data}
-    )
-    
-    return result.modified_count > 0
+    def query():
+        cursor = get_collection().find(
+            {}, {"title": 1, "meeting_date": 1, "created_at": 1,
+                 "minutes.summary": 1, "minutes.decisions": 1, "minutes.action_items.status": 1},
+        ).sort([("meeting_date", DESCENDING), ("created_at", DESCENDING)])
+        meetings = []
+        for doc in cursor:
+            minutes = doc.pop("minutes", None) or {}
+            items = minutes.get("action_items") or []
+            summary = minutes.get("summary") or ""
+            meetings.append(dict(
+                _to_public(doc),
+                summary=summary[:240] + ("…" if len(summary) > 240 else ""),
+                decision_count=len(minutes.get("decisions") or []),
+                action_item_count=len(items),
+                open_action_item_count=sum(1 for item in items if item.get("status") != "Done"),
+            ))
+        return meetings
+    return _run(query, "listing meetings")
 
-def delete_podcast(podcast_id):
-    """
-    Delete a Meeting document
-    
-    Args:
-        Meeting_id: ID of the Meeting document
-        
-    Returns:
-        bool: True if deletion was successful
-    """
-    from bson.objectid import ObjectId
-    
-    collection = get_podcast_collection()
-    result = collection.delete_one({"_id": ObjectId(podcast_id)})
-    
+
+def update_meeting(meeting_id, fields):
+    """Set top-level fields (e.g. {"minutes": {...}}) on a meeting"""
+    oid = _object_id(meeting_id)
+    update = dict(fields, updated_at=_now())
+    result = _run(lambda: get_collection().update_one({"_id": oid}, {"$set": update}), "updating the meeting")
+    return result.matched_count > 0
+
+
+def delete_meeting(meeting_id):
+    oid = _object_id(meeting_id)
+    result = _run(lambda: get_collection().delete_one({"_id": oid}), "deleting the meeting")
     return result.deleted_count > 0
+
+
+def list_action_items():
+    """
+    All action items across meetings, flattened, with the meeting they came from
+
+    Returns:
+        list: [{"meeting_id", "meeting_title", "meeting_date", "id", "task", "owner", "due_date", "priority", "status", "context"}]
+    """
+    def query():
+        cursor = get_collection().find(
+            {"minutes.action_items.0": {"$exists": True}},
+            {"title": 1, "meeting_date": 1, "minutes.action_items": 1},
+        ).sort("meeting_date", DESCENDING)
+        items = []
+        for doc in cursor:
+            for item in doc.get("minutes", {}).get("action_items", []):
+                items.append(dict(
+                    item,
+                    meeting_id=str(doc["_id"]),
+                    meeting_title=doc.get("title", ""),
+                    meeting_date=doc.get("meeting_date"),
+                ))
+        return items
+    return _run(query, "loading action items")
+
+
+def update_action_item(meeting_id, item_id, fields):
+    """Update fields (status, owner, due_date, priority) of one action item in place"""
+    oid = _object_id(meeting_id)
+    update = {f"minutes.action_items.$.{key}": value for key, value in fields.items()}
+    update["updated_at"] = _now()
+    result = _run(
+        lambda: get_collection().update_one({"_id": oid, "minutes.action_items.id": item_id}, {"$set": update}),
+        "updating the action item",
+    )
+    return result.matched_count > 0

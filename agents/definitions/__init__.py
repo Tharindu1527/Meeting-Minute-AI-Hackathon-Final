@@ -1,9 +1,9 @@
 # agents/definitions/__init__.py
 """
-Podcast Analysis Agent Definitions Package
+Meeting Analysis Agent Definitions Package
 
-This package contains definitions for specialized agents used in
-podcast analysis.
+This package contains definitions for the specialized agents used to
+produce meeting minutes.
 """
 
 # Import all agent definitions to ensure registration

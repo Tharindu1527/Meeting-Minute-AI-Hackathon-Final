@@ -1,0 +1,14 @@
+.git
+.env
+venv
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+debug_output
+qdrant_data
+tests
+frontend/node_modules
+frontend/dist
+.claude
+screenshots

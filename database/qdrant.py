@@ -1,163 +1,134 @@
 # database/qdrant.py
+"""
+Qdrant vector index of transcript chunks, used for semantic search in chat.
+
+QDRANT_URI can be an http(s) URL (Qdrant Cloud / server), ":memory:", or a
+local folder path for embedded on-disk storage (no server needed).
+"""
+import logging
+import uuid
+
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from utils.config import get_qdrant_api_key, get_qdrant_uri
-from api.openai import generate_embeddings
 
-def get_qdrant_client():
-    """
-    Get a Qdrant client instance
-    
-    Returns:
-        QdrantClient: Qdrant client
-    """
-    uri = get_qdrant_uri()
-    api_key = get_qdrant_api_key()
-    
-    return QdrantClient(url=uri, api_key=api_key)
+from api.llm import embed
+from utils.config import EMBEDDING_SIZE, get_qdrant_api_key, get_qdrant_collection, get_qdrant_uri
 
-def create_collection_if_not_exists(collection_name="podcast_vectors", vector_size=1536):
-    """
-    Create a Qdrant collection if it doesn't exist
-    
-    Args:
-        collection_name: Name of the collection
-        vector_size: Size of the vectors
-    """
-    client = get_qdrant_client()
-    
-    # Check if collection exists
-    collections = client.get_collections()
-    collection_names = [c.name for c in collections.collections]
-    
-    if collection_name not in collection_names:
-        # Create the collection
+logger = logging.getLogger(__name__)
+
+_client = None
+_collection_ready = False
+
+# Fixed namespace so a chunk always maps to the same point id (re-indexing overwrites, never duplicates)
+_POINT_NAMESPACE = uuid.UUID("6f1c8a52-3c2e-4d59-9a7e-0b8f2f9d4e11")
+
+
+def is_configured():
+    return bool(get_qdrant_uri())
+
+
+def get_client():
+    global _client
+    if _client is None:
+        uri = get_qdrant_uri()
+        if uri.startswith(("http://", "https://")):
+            _client = QdrantClient(url=uri, api_key=get_qdrant_api_key(), timeout=20)
+        elif uri == ":memory:":
+            _client = QdrantClient(location=":memory:")
+        else:
+            _client = QdrantClient(path=uri)
+    return _client
+
+
+def _meeting_filter(meeting_id):
+    return models.Filter(must=[models.FieldCondition(key="meeting_id", match=models.MatchValue(value=meeting_id))])
+
+
+def ensure_collection():
+    global _collection_ready
+    if _collection_ready:
+        return
+    client, name = get_client(), get_qdrant_collection()
+    if not client.collection_exists(name):
         client.create_collection(
-            collection_name=collection_name,
-            vectors_config=models.VectorParams(
-                size=vector_size,
-                distance=models.Distance.COSINE
-            )
+            collection_name=name,
+            vectors_config=models.VectorParams(size=EMBEDDING_SIZE, distance=models.Distance.COSINE),
         )
-        print(f"Created collection: {collection_name}")
+        client.create_payload_index(name, field_name="meeting_id", field_schema=models.PayloadSchemaType.KEYWORD)
     else:
-        print(f"Collection {collection_name} already exists")
+        size = client.get_collection(name).config.params.vectors.size
+        if size != EMBEDDING_SIZE:
+            raise RuntimeError(
+                f"Qdrant collection '{name}' holds {size}-dimension vectors, but the embedding model produces "
+                f"{EMBEDDING_SIZE}. Set QDRANT_COLLECTION to a new name, or delete the old collection."
+            )
+    _collection_ready = True
 
-def store_vectors(podcast_data, document_id):
+
+def index_meeting(meeting_id, title, chunks):
     """
-    Store Meeting vectors in Qdrant for semantic search
-    
+    Replace a meeting's transcript chunks in the index
+
     Args:
-        podcast_data: Dictionary containing Meeting data
-        document_id: MongoDB document ID as a reference
-        
+        meeting_id: MongoDB meeting id
+        title: Meeting title (stored for citations)
+        chunks: [{"text", "start_ms", "end_ms"}] from utils.transcript.chunk_utterances
+
     Returns:
-        bool: True if successful
+        int: Number of chunks indexed
     """
-    try:
-        # Create collection if it doesn't exist
-        create_collection_if_not_exists()
-        
-        # Generate embedding for the summary text
-        summary_text = podcast_data["summary"]
-        embedding = generate_embeddings(summary_text)
-        
-        # Convert MongoDB document to JSON-serializable dict
-        # This is the key fix - convert any MongoDB ObjectId to string
-        cleaned_data = json_serialize_podcast_data(podcast_data)
-        
-        # Generate a numeric hash ID from the string document_id
-        point_id = hash(str(document_id)) % (2**63)
-        
-        # Store in Qdrant
-        client = get_qdrant_client()
-        client.upsert(
-            collection_name="podcast_vectors",
-            points=[
-                models.PointStruct(
-                    id=point_id,  # Use a numeric ID
-                    vector=embedding,
-                    payload=cleaned_data  # Use cleaned data
-                )
-            ]
+    ensure_collection()
+    delete_meeting_vectors(meeting_id)
+    if not chunks:
+        return 0
+
+    vectors = embed([chunk["text"] for chunk in chunks])
+    points = [
+        models.PointStruct(
+            id=str(uuid.uuid5(_POINT_NAMESPACE, f"{meeting_id}:{index}")),
+            vector=vector,
+            payload={
+                "meeting_id": meeting_id,
+                "title": title,
+                "chunk_index": index,
+                "text": chunk["text"],
+                "start_ms": chunk.get("start_ms"),
+                "end_ms": chunk.get("end_ms"),
+            },
         )
-        
-        return True
-    except Exception as e:
-        print(f"Error storing vectors in Qdrant: {e}")
-        # Continue without vector storage for testing
-        return False
+        for index, (chunk, vector) in enumerate(zip(chunks, vectors))
+    ]
+    get_client().upsert(collection_name=get_qdrant_collection(), points=points)
+    return len(points)
 
-def json_serialize_podcast_data(podcast_data):
-    """
-    Convert MongoDB document with ObjectId to JSON-serializable dict
-    
-    Args:
-        podcast_data: Dictionary that may contain ObjectId
-        
-    Returns:
-        dict: JSON-serializable dictionary
-    """
-    from bson.objectid import ObjectId
-    import json
-    
-    # Define a custom JSON encoder to handle ObjectId
-    class MongoJSONEncoder(json.JSONEncoder):
-        def default(self, obj):
-            if isinstance(obj, ObjectId):
-                return str(obj)
-            return super().default(obj)
-    
-    # Convert to JSON and back to dict to ensure all values are serializable
-    json_str = json.dumps(podcast_data, cls=MongoJSONEncoder)
-    return json.loads(json_str)
 
-def generate_consistent_id(document_id):
+def search(query, meeting_id=None, limit=6):
     """
-    Generate a consistent numeric ID from a string ID
-    
-    Args:
-        document_id: String ID
-        
-    Returns:
-        int: Consistent numeric ID
-    """
-    import hashlib
-    
-    # Convert document_id to string if it's not already
-    doc_id_str = str(document_id)
-    
-    # Use MD5 to get a consistent hash
-    hash_object = hashlib.md5(doc_id_str.encode())
-    # Convert first 8 bytes of hash to integer
-    numeric_id = int.from_bytes(hash_object.digest()[:8], byteorder='big')
-    
-    return numeric_id
+    Semantic search over transcript chunks
 
-def search_similar_content(query_text, limit=3):
-    """
-    Search for Meeting content similar to the query
-    
     Args:
-        query_text: Query text to search for
-        limit: Maximum number of results to return
-        
+        query: Question or search text
+        meeting_id: Restrict to one meeting (None searches all meetings)
+        limit: Maximum number of chunks
+
     Returns:
-        list: List of search results
+        list: Chunk payload dicts with an added "score"
     """
-    try:
-        # Generate embedding for the query
-        query_embedding = generate_embeddings(query_text)
-        
-        # Search Qdrant
-        client = get_qdrant_client()
-        search_results = client.search(
-            collection_name="podcast_vectors",
-            query_vector=query_embedding,
-            limit=limit
-        )
-        
-        return search_results
-    except Exception as e:
-        print(f"Error searching vectors: {e}")
-        return []
+    ensure_collection()
+    vector = embed([query])[0]
+    response = get_client().query_points(
+        collection_name=get_qdrant_collection(),
+        query=vector,
+        query_filter=_meeting_filter(meeting_id) if meeting_id else None,
+        limit=limit,
+        with_payload=True,
+    )
+    return [dict(point.payload, score=point.score) for point in response.points]
+
+
+def delete_meeting_vectors(meeting_id):
+    ensure_collection()
+    get_client().delete(
+        collection_name=get_qdrant_collection(),
+        points_selector=models.FilterSelector(filter=_meeting_filter(meeting_id)),
+    )

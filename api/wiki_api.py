@@ -1,156 +1,67 @@
 # api/wiki_api.py
+import logging
+
 import requests
-import json
 
-def search_wikipedia(query, limit=1, language="en"):
-    """
-    Search Wikipedia for information on a given query
-    
-    Args:
-        query (str): Search query
-        limit (int): Maximum number of results to return
-        language (str): Language code for Wikipedia edition
-        
-    Returns:
-        str: Wikipedia extract or empty string if no results
-    """
-    try:
-        # Build the API URL
-        url = f"https://{language}.wikipedia.org/w/api.php"
-        
-        # Set up the request parameters
-        params = {
-            "action": "query",
-            "format": "json",
-            "prop": "extracts",
-            "exintro": True,
-            "explaintext": True,
-            "redirects": 1,
-            "titles": query,
-        }
-        
-        # Make the request
-        response = requests.get(url, params=params)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Extract the page content
-            pages = data.get("query", {}).get("pages", {})
-            
-            # Wikipedia API returns a dict with page IDs as keys
-            # We just need the content of the first valid page
-            content = ""
-            for page_id, page_data in pages.items():
-                if page_id != "-1":  # -1 means no results
-                    content = page_data.get("extract", "")
-                    break
-            
-            return content
-        else:
-            print(f"Wikipedia API request failed with status {response.status_code}")
-            return ""
-    
-    except Exception as e:
-        print(f"Error in Wikipedia API request: {str(e)}")
-        return ""
+logger = logging.getLogger(__name__)
 
-def get_wikipedia_summary(title, language="en"):
-    """
-    Get the summary of a Wikipedia article
-    
-    Args:
-        title (str): Exact Wikipedia article title
-        language (str): Language code for Wikipedia edition
-        
-    Returns:
-        str: Article summary or empty string if not found
-    """
-    try:
-        # Build the API URL
-        url = f"https://{language}.wikipedia.org/w/api.php"
-        
-        # Set up the request parameters
-        params = {
-            "action": "query",
-            "format": "json",
-            "prop": "extracts",
-            "exintro": True,
-            "explaintext": True,
-            "titles": title,
-        }
-        
-        # Make the request
-        response = requests.get(url, params=params)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Extract the page content
-            pages = data.get("query", {}).get("pages", {})
-            
-            # Get the first page content
-            for page_id, page_data in pages.items():
-                return page_data.get("extract", "")
-            
-            return ""
-        else:
-            print(f"Wikipedia API request failed with status {response.status_code}")
-            return ""
-    
-    except Exception as e:
-        print(f"Error in Wikipedia API request: {str(e)}")
-        return ""
+# Wikipedia asks API clients to identify themselves
+HEADERS = {"User-Agent": "MeetingMinutesAI/3.0 (meeting analysis app)"}
+TIMEOUT = 10
 
-def search_wikipedia_with_suggestions(query, limit=3, language="en"):
+
+def search_wikipedia(query, limit=3, language="en", extract_chars=1200):
     """
-    Search Wikipedia with query suggestions
-    
+    Full-text search Wikipedia and return intro extracts of the best matches
+
     Args:
-        query (str): Search query
-        limit (int): Maximum number of results to return
-        language (str): Language code for Wikipedia edition
-        
+        query: Free-text search query (a topic or a claim)
+        limit: Maximum number of articles to return
+        language: Wikipedia language edition
+        extract_chars: Maximum characters per extract
+
     Returns:
-        list: List of results with titles and extracts
+        list: [{"title", "extract", "url"}], empty if nothing was found or the request failed
     """
+    url = f"https://{language}.wikipedia.org/w/api.php"
     try:
-        # First, get search suggestions
-        url = f"https://{language}.wikipedia.org/w/api.php"
-        
-        params = {
-            "action": "opensearch",
-            "format": "json",
-            "search": query,
-            "limit": limit,
-            "namespace": 0,
-        }
-        
-        response = requests.get(url, params=params)
-        
-        if response.status_code != 200:
-            print(f"Wikipedia API request failed with status {response.status_code}")
+        search = requests.get(url, headers=HEADERS, timeout=TIMEOUT, params={
+            "action": "query", "list": "search", "srsearch": query,
+            "srlimit": limit, "format": "json",
+        })
+        search.raise_for_status()
+        titles = [hit["title"] for hit in search.json().get("query", {}).get("search", [])]
+        if not titles:
             return []
-        
-        data = response.json()
-        
-        # Extract titles from the response
-        titles = data[1]
-        
-        # For each title, get the summary
-        results = []
-        for title in titles:
-            summary = get_wikipedia_summary(title, language)
-            if summary:
-                results.append({
-                    "title": title,
-                    "extract": summary
-                })
-        
-        return results
-    
-    except Exception as e:
-        print(f"Error in Wikipedia API request: {str(e)}")
+
+        pages = requests.get(url, headers=HEADERS, timeout=TIMEOUT, params={
+            "action": "query", "prop": "extracts|info", "inprop": "url",
+            "exintro": True, "explaintext": True, "redirects": 1,
+            "titles": "|".join(titles), "format": "json",
+        })
+        pages.raise_for_status()
+        by_title = {
+            page.get("title"): page
+            for page in pages.json().get("query", {}).get("pages", {}).values()
+        }
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("Wikipedia request failed: %s", e)
         return []
+
+    results = []
+    for title in titles:  # keep search relevance order
+        page = by_title.get(title)
+        if page and page.get("extract"):
+            results.append({
+                "title": title,
+                "extract": page["extract"][:extract_chars],
+                "url": page.get("fullurl", f"https://{language}.wikipedia.org/wiki/{title.replace(' ', '_')}"),
+            })
+    return results
+
+
+def format_results(results):
+    """Render search results as text for an LLM prompt"""
+    if not results:
+        return "No relevant Wikipedia articles were found."
+    return "\n\n".join(f"{r['title']} ({r['url']}):\n{r['extract']}" for r in results)

@@ -1,68 +1,31 @@
 # crews/__init__.py
 """
-Podcast Analysis Crews Package
+Meeting Analysis Crews Package
 
-This package contains crew definitions for orchestrating agents
-to analyze podcasts with different capabilities and specializations.
+MeetingCrew orchestrates the agents that turn a transcript into minutes;
+its optional steps (fact checking, research, translation) are switched on
+per analysis. FactCheckCrew runs on-demand claim checking.
 """
 
-# Import base crew
-from crews.base_crew import BaseCrew
+from crews.base_crew import AnalysisError, BaseCrew
+from crews.fact_check_crew import FactCheckCrew
+from crews.meeting_crew import LANGUAGES, MeetingCrew, build_meeting_info
 
-# Import standard podcast crews
-from crews.podcast_crew import (
-    PodcastCrew,  
-    EnhancedPodcastCrew, 
-    MultilingualPodcastCrew,
-    ResearchPodcastCrew
-)
 
-# Import specialized research crews
-from crews.research_crew import (
-    DeepResearchCrew,
-    FactCheckingCrew
-)
-
-# Import specialized multilingual crews
-from crews.multilingual_crew import (
-    AdvancedMultilingualCrew,
-    LocalizationCrew
-)
-
-# Dictionary of available crews for easy access
-AVAILABLE_CREWS = {
-    "standard": PodcastCrew,
-    "enhanced": EnhancedPodcastCrew,
-    "multilingual": MultilingualPodcastCrew,
-    "research": ResearchPodcastCrew,
-    "deep_research": DeepResearchCrew,
-    "fact_checking": FactCheckingCrew,
-    "advanced_multilingual": AdvancedMultilingualCrew,
-    "localization": LocalizationCrew
-}
-
-def get_crew(crew_type="standard", **kwargs):
+def get_crew(model=None, fact_check=False, research=False, target_languages=None):
     """
-    Get a crew by type with optional configuration
-    
+    Create a meeting crew with the requested optional steps
+
     Args:
-        crew_type: Type of crew to create
-        **kwargs: Additional arguments to pass to the crew constructor
-        
-    Returns:
-        BaseCrew: Configured crew instance
-    """
-    if crew_type not in AVAILABLE_CREWS:
-        raise ValueError(f"Unknown crew type: {crew_type}. Available types: {list(AVAILABLE_CREWS.keys())}")
-    
-    # Create and return the crew instance
-    return AVAILABLE_CREWS[crew_type](**kwargs)
+        model: LLM model for all agents
+        fact_check: Add the fact-checker agent
+        research: Add the background researcher agent
+        target_languages: Languages to translate the minutes into
 
-def list_available_crews():
-    """
-    List all available crew types
-    
     Returns:
-        list: List of available crew types
+        MeetingCrew
     """
-    return list(AVAILABLE_CREWS.keys())
+    kwargs = {"fact_check": fact_check, "research": research, "target_languages": target_languages}
+    if model:
+        kwargs["model"] = model
+    return MeetingCrew(**kwargs)

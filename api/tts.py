@@ -1,137 +1,110 @@
 # api/tts.py
-import os
-import requests
-import tempfile
-from utils.config import get_openai_api_key
+"""Text-to-speech with Gemini's TTS model (Interactions API), returned as one WAV file"""
+import base64
+import io
+import logging
+import wave
 
-def text_to_speech(text, output_format="mp3", voice="alloy", model="tts-1"):
+from api.llm import AllModelsUnavailable, GeminiError, call_with_fallback, gemini_post
+from utils.config import FALLBACK_TTS_MODEL, get_tts_model
+from utils.transcript import split_text
+
+logger = logging.getLogger(__name__)
+
+# A selection of Gemini's 30 prebuilt voices
+VOICES = ["Kore", "Puck", "Charon", "Aoede", "Fenrir", "Leda", "Orus", "Zephyr"]
+
+MAX_CHARS_PER_REQUEST = 3000
+
+# Gemini TTS audio format: 24 kHz, 16-bit signed little-endian PCM, mono
+SAMPLE_RATE, SAMPLE_WIDTH, CHANNELS = 24000, 2, 1
+
+
+class TTSError(Exception):
+    """Raised when audio could not be generated"""
+
+
+def text_to_speech(text, voice="Kore"):
     """
-    Convert text to speech using OpenAI's text-to-speech API
-    
+    Convert text to speech
+
+    Long text is split on paragraph/sentence boundaries, each piece is spoken
+    separately, and the pieces are joined into one WAV file.
+
     Args:
-        text: Text to convert to speech
-        output_format: Output format (mp3, opus, aac, flac)
-        voice: Voice to use (alloy, echo, fable, onyx, nova, shimmer)
-        
+        text: Text to speak
+        voice: One of VOICES (any Gemini prebuilt voice name works)
+
     Returns:
-        str: Path to the audio file
+        bytes: WAV audio
     """
-    # Get OpenAI API key
-    api_key = get_openai_api_key()
-    
-    # Make API request
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    # Limit text length to avoid API errors (max 4096 chars recommended)
-    if len(text) > 4000:
-        text = text[:4000] + "... (summary truncated for audio conversion)"
-    
-    payload = {
-        "model": model,
-        "input": text,
-        "voice": voice,
-        "response_format": output_format
-    }
-    
+    if not text or not text.strip():
+        raise TTSError("There is no text to convert to audio")
+
+    models = list(dict.fromkeys([get_tts_model(), FALLBACK_TTS_MODEL]))
+    segments = []
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/audio/speech",
-            headers=headers,
-            json=payload
-        )
-        
-        # Check for errors
-        if response.status_code != 200:
-            print(f"TTS API error: {response.status_code}, {response.text}")
-            return None
-        
-        # Save the audio to a temporary file
-        temp_dir = os.path.join(tempfile.gettempdir(), "podcast_analyzer")
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        temp_file = os.path.join(temp_dir, f"summary_audio.{output_format}")
-        with open(temp_file, "wb") as f:
-            f.write(response.content)
-        
-        return temp_file
-    except Exception as e:
-        print(f"Error in text_to_speech: {str(e)}")
-        return None
+        for piece in split_text(text, MAX_CHARS_PER_REQUEST):
+            request = {
+                "input": [{"type": "user_input", "content": [{"type": "text", "text": piece}]}],
+                "response_format": {"type": "audio"},
+                "generation_config": {"speech_config": [{"voice": voice}]},
+            }
+            response = call_with_fallback(
+                lambda model: gemini_post("interactions", dict(request, model=model), timeout=180), models)
+            segments.append(extract_audio(response))
+    except (GeminiError, AllModelsUnavailable) as e:
+        logger.exception("Text-to-speech failed")
+        raise TTSError(str(e)) from e
 
-def chunk_text_for_tts(text, max_chunk_size=4000):
+    return merge_wav(segments)
+
+
+def extract_audio(response):
+    """The decoded audio bytes from an Interactions API response"""
+    for step in reversed(response.get("steps") or []):
+        if step.get("type") != "model_output":
+            continue
+        for part in reversed(step.get("content") or []):
+            if part.get("type") == "audio" and part.get("data"):
+                return base64.b64decode(part["data"])
+    raise TTSError("Gemini returned no audio")
+
+
+def _read_pcm(audio):
     """
-    Split text into appropriate chunks for TTS processing
-    
-    Args:
-        text: Text to split into chunks
-        max_chunk_size: Maximum characters per chunk
-        
+    PCM samples and format from a WAV file (or raw PCM in Gemini's default format)
+
     Returns:
-        list: List of text chunks
+        tuple: (pcm bytes, sample rate, sample width in bytes, channels)
     """
-    # If text is already small enough, return as single chunk
-    if len(text) <= max_chunk_size:
-        return [text]
-    
-    chunks = []
-    
-    # Try to split on paragraph breaks first
-    paragraphs = text.split('\n\n')
-    current_chunk = ""
-    
-    for paragraph in paragraphs:
-        # If adding this paragraph exceeds max size, start a new chunk
-        if len(current_chunk) + len(paragraph) > max_chunk_size:
-            # Only add the current chunk if it's not empty
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = paragraph
-        else:
-            # Add paragraph to current chunk
-            if current_chunk:
-                current_chunk += "\n\n" + paragraph
-            else:
-                current_chunk = paragraph
-    
-    # Add the last chunk if it's not empty
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    # If any chunks are still too large, split them on sentences
-    final_chunks = []
-    for chunk in chunks:
-        if len(chunk) <= max_chunk_size:
-            final_chunks.append(chunk)
-        else:
-            # Split on sentences (try to detect sentence ends)
-            sentence_ends = ['. ', '! ', '? ']
-            current_sentence = ""
-            current_sub_chunk = ""
-            
-            for char in chunk:
-                current_sentence += char
-                current_sub_chunk += char
-                
-                # Check if we've reached a sentence end
-                is_sentence_end = False
-                for end in sentence_ends:
-                    if current_sentence.endswith(end):
-                        is_sentence_end = True
-                        break
-                
-                if is_sentence_end:
-                    # If adding another sentence would exceed max size, start a new chunk
-                    if len(current_sub_chunk) >= max_chunk_size:
-                        final_chunks.append(current_sub_chunk.strip())
-                        current_sub_chunk = ""
-                    
-                    current_sentence = ""
-            
-            # Add the last sub-chunk if it's not empty
-            if current_sub_chunk:
-                final_chunks.append(current_sub_chunk.strip())
-    
-    return final_chunks
+    if audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        return audio, SAMPLE_RATE, SAMPLE_WIDTH, CHANNELS
+    rate, width, channels, pcm = SAMPLE_RATE, SAMPLE_WIDTH, CHANNELS, b""
+    position = 12
+    while position + 8 <= len(audio):
+        chunk_id = audio[position:position + 4]
+        size = int.from_bytes(audio[position + 4:position + 8], "little")
+        body = audio[position + 8:position + 8 + size]
+        if chunk_id == b"fmt ":
+            channels = int.from_bytes(body[2:4], "little")
+            rate = int.from_bytes(body[4:8], "little")
+            width = int.from_bytes(body[14:16], "little") // 8
+        elif chunk_id == b"data":
+            pcm = body
+        position += 8 + size + (size & 1)
+    return pcm, rate, width, channels
+
+
+def merge_wav(segments):
+    """Join audio segments (WAV or raw PCM) into one WAV file"""
+    parsed = [_read_pcm(segment) for segment in segments]
+    _, rate, width, channels = parsed[0]
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(width)
+        wav.setframerate(rate)
+        for pcm, *_ in parsed:
+            wav.writeframes(pcm)
+    return output.getvalue()

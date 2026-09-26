@@ -1,118 +1,69 @@
 # agents/tasks/task_base.py
+import json
+
 from crewai import Task
-from agents.registry import get_agent
+
+# Shared instructions appended to every task
+COMMON_RULES = """
+Rules:
+- Use only the transcript and the context provided. Do not invent names, numbers, dates, decisions or commitments.
+- If something was not discussed, leave that field empty or null rather than guessing.
+- Refer to people by the names in the attendee list when one is available.
+- Write in the same language as the transcript."""
+
+
+def json_instructions(output_model):
+    """Instruction asking for a JSON answer that matches the model's schema"""
+    schema = json.dumps(output_model.model_json_schema(), separators=(",", ":"))
+    return (
+        "Your final answer must be a single JSON object, with no code fences and no text before or after it, "
+        f"that matches this JSON schema: {schema}"
+    )
+
 
 class BaseTask:
     """
     Base class for all task types
-    
-    This provides common functionality for creating and configuring tasks
-    that can be executed by agents in the podcast analysis system.
+
+    Inputs are passed two ways:
+      - `sections`: literal text (transcript, meeting details) added to the description
+      - `context`: upstream CrewAI tasks; CrewAI hands their outputs to this task
+
+    Structured output is requested through the prompt and parsed by
+    crews.base_crew.structured_output rather than CrewAI's `output_pydantic`:
+    CrewAI 0.105's converter crashes when a model's JSON needs repair.
     """
-    
+
     @staticmethod
-    def create_task(agent, description, expected_output, context=None, input_data=None, max_input_length=5000):
+    def create_task(agent, description, expected_output, output_model=None, context=None, sections=None):
         """
-        Create a CrewAI task with standardized formatting
-        
+        Create a CrewAI task
+
         Args:
-            agent: Agent that will execute the task (ID string or agent instance)
-            description (str): Task description/instructions
-            expected_output (str): Expected output format
-            context (dict, optional): Additional context for the task
-            input_data (str/dict/object, optional): Input data for the task
-            max_input_length (int, optional): Maximum length of input data to include
-            
+            agent: BaseAgent instance (or a CrewAI Agent)
+            description (str): Task instructions
+            expected_output (str): Short description of the result
+            output_model: Pydantic model the answer must match (requested as JSON)
+            context (list, optional): Upstream tasks whose outputs this task needs
+            sections (dict, optional): {"LABEL": text} blocks appended to the description
+
         Returns:
             Task: CrewAI task
         """
-        # Get agent instance if string is provided
-        if isinstance(agent, str):
-            agent_instance = get_agent(agent).create_agent()
-        elif hasattr(agent, 'create_agent'):
-            agent_instance = agent.create_agent()
-        else:
-            agent_instance = agent
-        
-        # Process input data if provided
-        if input_data:
-            # Handle different input types
-            processed_input = BaseTask.process_input_data(input_data, max_input_length)
-            
-            # Add input content to description
-            full_description = f"{description}\n\nINPUT:\n{processed_input}"
-        else:
-            full_description = description
-            
-        # Create the task
-        task = Task(
-            description=full_description,
-            agent=agent_instance,
-            expected_output=expected_output,
-            context=context
-        )
-        
-        return task
-    
-    @staticmethod
-    def process_input_data(input_data, max_length=5000):
-        """
-        Process and format input data for a task
-        
-        Args:
-            input_data: Input data in various formats
-            max_length: Maximum length to include
-            
-        Returns:
-            str: Processed input data
-        """
-        # Handle string inputs
-        if isinstance(input_data, str):
-            return input_data[:max_length]
-            
-        # Handle task objects
-        elif hasattr(input_data, 'get'):
-            return input_data.get("output", "")[:max_length]
-            
-        # Handle objects with output attribute
-        elif hasattr(input_data, 'output'):
-            return str(input_data.output)[:max_length]
-            
-        # Handle dictionaries with multiple inputs
-        elif isinstance(input_data, dict):
-            sections = []
-            for key, value in input_data.items():
-                if isinstance(value, str):
-                    content = value[:max_length//len(input_data)]
-                else:
-                    content = str(value)[:max_length//len(input_data)]
-                sections.append(f"{key.upper()}:\n{content}")
-            return "\n\n".join(sections)
-            
-        # Handle other types
-        else:
-            return str(input_data)[:max_length]
-    
-    @staticmethod
-    def execute_with_agent(task, agent_id=None, agent_instance=None, max_attempts=1):
-        """
-        Execute a task with a specified agent
-        
-        Args:
-            task: Task to execute
-            agent_id: ID of agent to use (alternative to agent_instance)
-            agent_instance: Agent instance to use (alternative to agent_id)
-            max_attempts: Maximum number of execution attempts
-            
-        Returns:
-            str: Task result
-        """
-        # Get the agent if ID is provided
-        if agent_id and not agent_instance:
-            agent_instance = get_agent(agent_id)
-            
-        if not agent_instance:
-            raise ValueError("Either agent_id or agent_instance must be provided")
-            
-        # Execute the task
-        return agent_instance.execute_task(task, max_iterations=max_attempts)
+        crew_agent = agent.create_agent() if hasattr(agent, "create_agent") else agent
+
+        full_description = description.strip() + "\n" + COMMON_RULES
+        for label, content in (sections or {}).items():
+            full_description += f"\n\n===== {label} =====\n{content}"
+
+        if output_model is not None:
+            expected_output = f"{expected_output}\n{json_instructions(output_model)}"
+
+        task_kwargs = {
+            "description": full_description,
+            "expected_output": expected_output,
+            "agent": crew_agent,
+        }
+        if context:
+            task_kwargs["context"] = list(context)
+        return Task(**task_kwargs)
