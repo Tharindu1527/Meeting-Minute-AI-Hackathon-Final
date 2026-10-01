@@ -33,6 +33,12 @@ def main():
         values.pop("QDRANT_URI")
 
     api = HfApi()
+    # Password-reset emails must link to the Space, not to a local address from .env
+    if not values.get("APP_URL") or "localhost" in values["APP_URL"] or "127.0.0.1" in values["APP_URL"]:
+        host = api.space_info(space).host
+        if host:
+            values["APP_URL"] = host
+            print("APP_URL will be", host)
     for key, value in values.items():
         api.add_space_secret(space, key, value)
         print("set", key)

@@ -108,8 +108,11 @@ The container runs as an unprivileged user and listens on `$PORT` (default 8000)
 
 The block at the top of this README configures a [Docker Space](https://huggingface.co/docs/hub/spaces-sdks-docker) (free CPU hardware is enough).
 
-1. Create a Space with the **Docker** SDK and upload this repository to it (the Space builds the Dockerfile).
-2. In the Space's **Settings → Variables and secrets**, add every variable from your `.env` as a **secret**. A public Space's URL is open to everyone, so set `SIGNUP_CODE` (or `ALLOW_SIGNUP=false` once your accounts exist) and `APP_URL`.
+1. Log in once with `venv\Scripts\hf auth login` (a **write** token from huggingface.co → Settings → Access Tokens), then run
+   `venv\Scripts\python scripts\deploy_hf_space.py <username>/<space-name>`. It creates the Docker Space on the first run
+   and uploads what is committed in git (never `.env`); run it again after each commit to redeploy.
+2. Run `venv\Scripts\python scripts\hf_space_secrets.py <username>/<space-name>` to copy your `.env` into the Space as
+   **secrets** (it also sets `APP_URL` to the Space's address). You can edit them later under the Space's **Settings → Variables and secrets**. A public Space's URL is open to everyone, so put a `SIGNUP_CODE` in `.env` first (or set `ALLOW_SIGNUP=false` once your accounts exist).
 3. MongoDB Atlas must accept connections from the Space: under **Network Access**, allow `0.0.0.0/0` (Spaces have no fixed IP address) and keep a strong database password.
 4. Uploads are processed in the container, but everything that must last (meetings, search index) lives in MongoDB Atlas and Qdrant Cloud, so restarts lose nothing except jobs that were running.
 
