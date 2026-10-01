@@ -13,6 +13,19 @@ const VARIANTS: Record<Variant, string> = {
   danger: "bg-bad text-white shadow-[0_10px_24px_-12px_var(--bad)] hover:brightness-110",
 };
 
+/** Button styling, also for links that should look like buttons */
+export function buttonClass(variant: Variant = "secondary", size: "sm" | "md" | "lg" = "md", className?: string) {
+  return cx(
+    "inline-flex items-center justify-center gap-2 rounded-xl font-medium whitespace-nowrap",
+    "transition-all duration-200 ease-out active:scale-[0.97]",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand",
+    "disabled:pointer-events-none disabled:opacity-50",
+    size === "sm" ? "h-8 px-3 text-sm" : size === "lg" ? "h-12 px-6 text-[15px]" : "h-10 px-4 text-sm",
+    VARIANTS[variant],
+    className,
+  );
+}
+
 export function Button({
   variant = "secondary",
   size = "md",
@@ -29,20 +42,7 @@ export function Button({
   loading?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      disabled={disabled || loading}
-      className={cx(
-        "inline-flex items-center justify-center gap-2 rounded-xl font-medium whitespace-nowrap",
-        "transition-all duration-200 ease-out active:scale-[0.97]",
-        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand",
-        "disabled:pointer-events-none disabled:opacity-50",
-        size === "sm" ? "h-8 px-3 text-sm" : size === "lg" ? "h-12 px-6 text-[15px]" : "h-10 px-4 text-sm",
-        VARIANTS[variant],
-        className,
-      )}
-      {...props}
-    >
+    <button type="button" disabled={disabled || loading} className={buttonClass(variant, size, className)} {...props}>
       {loading ? <LoaderCircle className="size-4 animate-spin" /> : Icon && <Icon className="size-4" />}
       {children}
     </button>

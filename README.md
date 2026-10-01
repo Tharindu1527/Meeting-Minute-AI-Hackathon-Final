@@ -19,12 +19,14 @@ The app is a **React + Vite** frontend (TypeScript, Tailwind CSS, TanStack Query
 
 | Page | What it does |
 |---|---|
+| 🔐 **Accounts** | Sign up, sign in ("keep me signed in" for 30 days), reset a forgotten password by email, change your password, sign out other devices, delete your account. Each account's meetings are private to it. |
 | 📝 **New meeting** | Upload audio/video (mp3, wav, m4a, mp4, mov, webm…), give a recording URL, upload a transcript (.txt, .vtt, .srt — Zoom and Teams exports keep speaker names) or paste text. Transcription includes speaker labels, timestamps, language detection and optional PII redaction. |
 | 📚 **Meetings** | Browse past meetings; view or edit the minutes; export to Word, Markdown or HTML (print to PDF); email them; delete. |
 | ✅ **Action items** | Every action item across all meetings: filter by status/owner, see what's overdue, update status, owner, due date and priority. |
 | 💬 **Chat** | Ask questions about one meeting or all of them. Answers cite the transcript with timestamps. |
 | 🔊 **Listen** | Audio version of the minutes (summary, decisions, action items), in the original language or a translation. |
 | 🔎 **Fact check** | Find factual claims in a meeting and verify the ones you pick against Wikipedia. |
+| ⚙️ **Account** | Profile, light/dark/system theme, password, sessions, and account deletion. Press **Ctrl K** (⌘K on a Mac) anywhere to jump to a page or meeting. |
 
 ### The agent crew
 
@@ -62,7 +64,10 @@ Fill in `.env`:
 | `MONGODB_URI` | yes | Stores meetings (MongoDB Atlas free tier works) |
 | `ASSEMBLYAI_API_KEY` | for recordings | Speech-to-text with speaker labels |
 | `QDRANT_URI` | no | Semantic chat search. A folder path such as `./qdrant_data` needs no server; empty = keyword search |
-| `APP_PASSWORD` | recommended | Password-protects the app |
+| `SIGNUP_CODE` | recommended when public | Invite code that new accounts must enter, so strangers can't sign up and use your Gemini quota |
+| `ALLOW_SIGNUP` | no | `false` stops new sign-ups (the very first account can always be created) |
+| `APP_URL` | recommended when deployed | The app's public address (e.g. `https://you-meeting-minutes-ai.hf.space`), used in password-reset emails |
+| `AUTH_SECRET` | no | Key that signs sign-in tokens. When unset, one is generated and kept in MongoDB |
 | `SMTP_*` / `EMAIL_FROM` | no | Email via SMTP (e.g. Gmail with an [app password](https://myaccount.google.com/apppasswords)) |
 | `COMPOSIO_API_KEY` | no | Email via Composio's Gmail integration (connect Gmail in the Composio dashboard first) |
 
@@ -104,15 +109,17 @@ The container runs as an unprivileged user and listens on `$PORT` (default 8000)
 The block at the top of this README configures a [Docker Space](https://huggingface.co/docs/hub/spaces-sdks-docker) (free CPU hardware is enough).
 
 1. Create a Space with the **Docker** SDK and upload this repository to it (the Space builds the Dockerfile).
-2. In the Space's **Settings → Variables and secrets**, add every variable from your `.env` as a **secret**. Set `APP_PASSWORD`, because a public Space's URL is open to everyone.
+2. In the Space's **Settings → Variables and secrets**, add every variable from your `.env` as a **secret**. A public Space's URL is open to everyone, so set `SIGNUP_CODE` (or `ALLOW_SIGNUP=false` once your accounts exist) and `APP_URL`.
 3. MongoDB Atlas must accept connections from the Space: under **Network Access**, allow `0.0.0.0/0` (Spaces have no fixed IP address) and keep a strong database password.
 4. Uploads are processed in the container, but everything that must last (meetings, search index) lives in MongoDB Atlas and Qdrant Cloud, so restarts lose nothing except jobs that were running.
 
 ### How it fits together
 
 - Slow work (generating minutes, fact checking) runs as a **background job**: the API returns a job id straight away and the page polls `GET /api/jobs/{id}` for progress.
-- With `APP_PASSWORD` set, `POST /api/auth/login` returns a signed token that the frontend sends with every request; changing the password signs everyone out.
-- `GET /api/status` is public and tells the frontend which services are configured, which models to offer, and whether sign-in is needed.
+- **Accounts** live in MongoDB (`users` collection). Passwords are hashed with scrypt; signing in returns a signed token (HS256 JWT) that the frontend sends with every request. Changing or resetting a password signs out every other session, and password-reset links work once and expire after an hour.
+- **Every meeting belongs to one account.** Each API route only reads and writes the signed-in user's meetings, jobs and search results; other users' meeting ids answer 404. Meetings saved before accounts existed go to the first account created.
+- Repeated failed sign-ins (8 in 15 minutes) and reset-email requests are rate-limited.
+- `GET /api/status` is public and tells the frontend which services are configured, which models to offer, and how accounts can be created.
 
 ### Gemini free tier
 
@@ -139,10 +146,11 @@ Tests run offline: MongoDB is replaced by `mongomock`, the API is exercised with
 
 ```
 frontend/               React + Vite + TypeScript app
-  src/pages/            New meeting, Meetings, Meeting detail, Action items, Chat, Listen, Fact check, sign-in
+  src/pages/            New meeting, Meetings, Meeting detail, Action items, Chat, Listen, Fact check, Account,
+                        sign-in / sign-up / password reset (Auth.tsx)
   src/components/       Layout, minutes view/editor, job progress, share panel, UI primitives
   src/lib/              Typed API client, types, hooks, formatting
-server/                 FastAPI backend: routes, background jobs, optional password auth
+server/                 FastAPI backend: routes, background jobs, accounts and sign-in (auth.py, routes/auth.py)
 app/pipeline.py         Source -> transcript -> AI crew -> saved + indexed meeting
 app/chatbot.py          Retrieval + answer generation for chat
 app/export.py           Markdown / HTML / Word / speech-script rendering (HTML is also the email body)
@@ -158,5 +166,5 @@ utils/                  Config and transcript parsing/chunking
 
 - Meeting transcripts are sent to Google Gemini and (for recordings) AssemblyAI. Enable **PII redaction** in the transcription options to mask phone numbers, emails and card/ID numbers.
 - **Gemini free tier:** Google states that content sent on the free tier is used to improve its products. For confidential meetings, enable billing on the Google Cloud project behind your API key (paid-tier content is not used this way).
-- Set `APP_PASSWORD` before deploying anywhere public: without it, anyone with the link can read every meeting.
+- Meetings are private to the account that created them. Before deploying publicly, set `SIGNUP_CODE` or turn sign-up off with `ALLOW_SIGNUP=false`, otherwise anyone with the link can create an account and use your API quotas.
 - CrewAI sends anonymous usage telemetry by default; set `OTEL_SDK_DISABLED=true` to turn it off.

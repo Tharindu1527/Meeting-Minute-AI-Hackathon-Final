@@ -1,22 +1,22 @@
 # server/routes/status.py
-"""Public endpoints: app configuration/service status and sign-in"""
+"""Public endpoint: app configuration, service status and how accounts are created"""
 import time
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter
 
 from api import assemblyai
 from api.email_service import active_provider
 from api.tts import VOICES
 from crews import LANGUAGES
 from database import mongodb, qdrant
-from server.auth import issue_token, password_matches
+from server.routes.auth import signup_open
 from utils.config import (
     MODEL_OPTIONS,
     OPTIONAL_VARS,
     REQUIRED_VARS,
-    get_app_password,
     get_default_model,
+    get_signup_code,
+    is_signup_allowed,
     missing_required_vars,
 )
 
@@ -43,7 +43,11 @@ def status():
     email = active_provider()
     return {
         "version": "3.0",
-        "auth_required": bool(get_app_password()),
+        "auth": {
+            "signup_open": signup_open() if db_ok else is_signup_allowed(),
+            "invite_code_required": bool(get_signup_code()),
+            "password_reset": bool(email),
+        },
         "missing_config": [{"name": name, "purpose": REQUIRED_VARS[name]} for name in missing],
         "optional_config": [{"name": name, "purpose": purpose} for name, purpose in OPTIONAL_VARS.items()],
         "services": {
@@ -59,16 +63,3 @@ def status():
         "languages": LANGUAGES,
         "voices": VOICES,
     }
-
-
-class LoginRequest(BaseModel):
-    password: str
-
-
-@router.post("/auth/login")
-def login(body: LoginRequest):
-    if not get_app_password():
-        return {"token": None}
-    if not password_matches(body.password):
-        raise HTTPException(status_code=401, detail="Incorrect password")
-    return {"token": issue_token(get_app_password())}

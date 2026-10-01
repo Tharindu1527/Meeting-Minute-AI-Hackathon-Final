@@ -10,25 +10,49 @@ import type {
   Meeting,
   MeetingSummary,
   Minutes,
+  Session,
   TrackedActionItem,
+  User,
 } from "./types";
 
 const TOKEN_KEY = "meeting-minutes-token";
+// Used when storage is unavailable (some private windows): the session lasts for this page load
+let memoryToken: string | null = null;
 
-export function getToken(): string | null {
+function storage(kind: "local" | "session"): Storage | null {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    return kind === "local" ? window.localStorage : window.sessionStorage;
   } catch {
     return null;
   }
 }
 
-export function setToken(token: string | null) {
+export function getToken(): string | null {
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
+    return storage("local")?.getItem(TOKEN_KEY) ?? storage("session")?.getItem(TOKEN_KEY) ?? memoryToken;
   } catch {
-    // Storage unavailable (private mode): the token only lives for this page load
+    return memoryToken;
+  }
+}
+
+/** Whether the current session was started with "Keep me signed in" (kept across browser restarts) */
+export function isRemembered(): boolean {
+  try {
+    return Boolean(storage("local")?.getItem(TOKEN_KEY));
+  } catch {
+    return false;
+  }
+}
+
+/** Store the sign-in token: in localStorage when remembered, otherwise only for this browser session */
+export function setToken(token: string | null, remember = true) {
+  memoryToken = token;
+  try {
+    storage("local")?.removeItem(TOKEN_KEY);
+    storage("session")?.removeItem(TOKEN_KEY);
+    if (token) storage(remember ? "local" : "session")?.setItem(TOKEN_KEY, token);
+  } catch {
+    // Storage unavailable: memoryToken keeps the session for this page load
   }
 }
 
@@ -80,7 +104,8 @@ async function request<T>(path: string, options: RequestOptions = {}, as: "json"
     } catch {
       // Not JSON (e.g. a proxy error page): keep the status text
     }
-    if (response.status === 401 && path !== "/auth/login") {
+    // A rejected token means the session ended; wrong passwords on the sign-in forms don't
+    if (response.status === 401 && token && !path.startsWith("/auth/login")) {
       setToken(null);
       onUnauthorized?.();
     }
@@ -91,7 +116,24 @@ async function request<T>(path: string, options: RequestOptions = {}, as: "json"
 
 export const api = {
   status: () => request<AppStatus>("/status"),
-  login: (password: string) => request<{ token: string | null }>("/auth/login", { method: "POST", json: { password } }),
+
+  register: (body: { name: string; email: string; password: string; invite_code?: string; remember: boolean }) =>
+    request<Session>("/auth/register", { method: "POST", json: body }),
+  login: (body: { email: string; password: string; remember: boolean }) => request<Session>("/auth/login", { method: "POST", json: body }),
+  me: () => request<User>("/auth/me"),
+  updateProfile: (name: string) => request<User>("/auth/me", { method: "PATCH", json: { name } }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<Session>("/auth/change-password", {
+      method: "POST",
+      json: { current_password: currentPassword, new_password: newPassword, remember: isRemembered() },
+    }),
+  signOutOthers: () => request<Session>("/auth/sign-out-others", { method: "POST", json: { remember: isRemembered() } }),
+  deleteAccount: (password: string) =>
+    request<{ deleted: boolean; meetings_deleted: number }>("/auth/delete-account", { method: "POST", json: { password } }),
+  forgotPassword: (email: string) => request<{ sent: boolean }>("/auth/forgot-password", { method: "POST", json: { email } }),
+  checkResetToken: (token: string) => request<{ email: string }>("/auth/reset-password/check", { method: "POST", json: { token } }),
+  resetPassword: (token: string, password: string) =>
+    request<Session>("/auth/reset-password", { method: "POST", json: { token, password } }),
 
   meetings: () => request<MeetingSummary[]>("/meetings"),
   meeting: (id: string) => request<Meeting>(`/meetings/${id}`),

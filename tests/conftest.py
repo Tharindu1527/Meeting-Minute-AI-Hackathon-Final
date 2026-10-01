@@ -18,7 +18,10 @@ os.environ.update({
     "MONGODB_DB_NAME": "test_meeting_minutes",
     "ASSEMBLYAI_API_KEY": "",
     "QDRANT_URI": "",
-    "APP_PASSWORD": "",
+    "AUTH_SECRET": "test-signing-key",
+    "ALLOW_SIGNUP": "",
+    "SIGNUP_CODE": "",
+    "APP_URL": "",
     "EMAIL_PROVIDER": "",
     "SMTP_HOST": "",
     "SMTP_USER": "",
@@ -40,17 +43,27 @@ def fresh_gemini_state():
     llm.reset_state()
 
 
+@pytest.fixture(autouse=True)
+def fresh_rate_limits():
+    from server import auth
+
+    auth.failed_logins.reset()
+    auth.account_requests.reset()
+
+
 @pytest.fixture
 def mongo():
     """Point the database module at an in-memory mongomock client"""
     import mongomock
 
-    from database import mongodb
+    from database import mongodb, users
 
     previous = mongodb._client
     mongodb._client = mongomock.MongoClient()
+    mongodb._indexes_ready = users._indexes_ready = False
     yield mongodb
     mongodb._client = previous
+    mongodb._indexes_ready = users._indexes_ready = False
 
 
 @pytest.fixture

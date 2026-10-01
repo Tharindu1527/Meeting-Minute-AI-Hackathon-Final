@@ -19,9 +19,10 @@ MAX_CONCURRENT_JOBS = 2
 
 
 class Job:
-    def __init__(self, kind):
+    def __init__(self, kind, owner_id):
         self.id = uuid.uuid4().hex
         self.kind = kind
+        self.owner_id = owner_id
         self.status = "running"  # running | done | error
         self.steps = []
         self.done = 0
@@ -53,23 +54,25 @@ class JobManager:
         self._jobs = {}
         self._lock = threading.Lock()
 
-    def start(self, kind, fn, *args, **kwargs):
+    def start(self, kind, owner_id, fn, *args, **kwargs):
         """
-        Run fn(job, *args, **kwargs) in the background; its return value becomes job.result
+        Run fn(job, *args, **kwargs) in the background for a user; its return value becomes job.result
 
         Returns:
             Job
         """
-        job = Job(kind)
+        job = Job(kind, owner_id)
         with self._lock:
             self._prune()
             self._jobs[job.id] = job
         self._executor.submit(self._run, job, fn, args, kwargs)
         return job
 
-    def get(self, job_id):
+    def get(self, job_id, owner_id):
+        """The job, or None when it doesn't exist (any more) or another user started it"""
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+        return job if job and job.owner_id == owner_id else None
 
     @staticmethod
     def _run(job, fn, args, kwargs):

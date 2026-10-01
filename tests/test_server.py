@@ -1,6 +1,7 @@
 """API tests: the FastAPI backend with MongoDB swapped for mongomock and the AI crews faked"""
 import copy
 import time
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,10 +13,19 @@ from crews.meeting_crew import MeetingCrew
 from models import CheckedClaim, Claim
 
 
+def signed_in_client(app, email="ana@example.com", name="Ana"):
+    """A TestClient for `app` that is signed in to a new account"""
+    client = TestClient(app)
+    response = client.post("/api/auth/register", json={"name": name, "email": email, "password": "correct horse battery"})
+    assert response.status_code == 201, response.text
+    client.headers["Authorization"] = f"Bearer {response.json()['token']}"
+    return client
+
+
 @pytest.fixture
 def client(mongo):
     server.routes.status._db_status.update(checked_at=time.time(), ok=True, error=None)
-    return TestClient(server.main.create_app())
+    return signed_in_client(server.main.create_app())
 
 
 @pytest.fixture
@@ -56,20 +66,38 @@ def create_meeting(client, **overrides):
 
 def test_status_is_public_and_describes_services(client):
     body = client.get("/api/status").json()
-    assert body["auth_required"] is False and body["missing_config"] == []
+    assert body["missing_config"] == []
+    assert body["auth"] == {"signup_open": True, "invite_code_required": False, "password_reset": False}
     assert body["services"]["database"] == {"ok": True, "detail": "connected"}
     assert body["services"]["transcription"]["ok"] is False
     assert "gemini-3.8-flash" in body["models"] and "Spanish" in body["languages"] and "Kore" in body["voices"]
 
 
-def test_password_protects_the_api(client, monkeypatch):
-    monkeypatch.setenv("APP_PASSWORD", "s3cret")
-    assert client.get("/api/meetings").status_code == 401
-    assert client.post("/api/auth/login", json={"password": "wrong"}).status_code == 401
-    token = client.post("/api/auth/login", json={"password": "s3cret"}).json()["token"]
-    assert client.get("/api/meetings", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+def test_api_requires_sign_in(client):
+    anonymous = TestClient(client.app)
+    for method, path in [("get", "/api/meetings"), ("get", "/api/action-items"), ("get", "/api/jobs/x"),
+                         ("post", "/api/chat"), ("get", "/api/auth/me")]:
+        assert getattr(anonymous, method)(path).status_code == 401, path
+    assert client.get("/api/meetings").status_code == 200
     assert client.get("/api/meetings", headers={"Authorization": "Bearer 9999999999.forged"}).status_code == 401
-    assert client.get("/api/status").json()["auth_required"] is True
+
+
+def test_meetings_are_private_between_accounts(client, fake_crew, monkeypatch):
+    import app.chatbot
+
+    meeting_id, job = create_meeting(client)
+    ben = signed_in_client(client.app, email="ben@example.com", name="Ben")
+
+    assert ben.get("/api/meetings").json() == [] and ben.get("/api/action-items").json() == []
+    assert ben.get(f"/api/meetings/{meeting_id}").status_code == 404
+    assert ben.get(f"/api/jobs/{job['id']}").status_code == 404
+    assert ben.get(f"/api/meetings/{meeting_id}/export/md").status_code == 404
+    assert ben.patch(f"/api/meetings/{meeting_id}/action-items/a1", json={"status": "Done"}).status_code == 404
+    assert ben.delete(f"/api/meetings/{meeting_id}").status_code == 404
+    monkeypatch.setattr(app.chatbot, "chat", lambda messages, model=None: "answer")
+    assert ben.post("/api/chat", json={"question": "Budget?"}).status_code == 400  # Ben has no meetings to ask about
+    assert ben.post("/api/chat", json={"question": "Budget?", "meeting_id": meeting_id}).status_code == 404
+    assert client.get(f"/api/meetings/{meeting_id}").status_code == 200
 
 
 def test_generate_meeting_runs_as_a_job(client, fake_crew, mongo):
@@ -135,7 +163,7 @@ def test_action_item_tracker(client, fake_crew):
     meeting_id, _ = create_meeting(client)
     items = client.get("/api/action-items").json()
     by_id = {item["id"]: item for item in items}
-    assert by_id["a1"]["overdue"] is False or by_id["a1"]["due_date"] < "2026-09-25"
+    assert by_id["a1"]["overdue"] == (date.fromisoformat(by_id["a1"]["due_date"]) < date.today())
     assert by_id["a1"]["meeting_title"] == "Q3 budget review"
 
     url = f"/api/meetings/{meeting_id}/action-items/a1"

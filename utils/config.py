@@ -23,7 +23,9 @@ REQUIRED_VARS = {
 OPTIONAL_VARS = {
     "ASSEMBLYAI_API_KEY": "transcribing audio/video (uploaded or pasted transcripts work without it)",
     "QDRANT_URI": "semantic search in chat (chat falls back to keyword search over the transcript)",
-    "APP_PASSWORD": "password-protecting the app",
+    "SIGNUP_CODE": "an invite code that new accounts must enter (recommended for public deployments)",
+    "ALLOW_SIGNUP": "set to false to stop new sign-ups once your accounts exist",
+    "APP_URL": "the app's public address, used in password-reset emails",
     "SMTP_HOST": "sending minutes by email over SMTP",
     "COMPOSIO_API_KEY": "sending minutes by email through Composio's Gmail integration",
 }
@@ -123,8 +125,24 @@ def get_qdrant_collection():
     return get_setting("QDRANT_COLLECTION", "meeting_chunks")
 
 
-def get_app_password():
-    return get_setting("APP_PASSWORD")
+def get_auth_secret():
+    """Key that signs sign-in tokens; when unset, one is generated and kept in the database"""
+    return get_setting("AUTH_SECRET")
+
+
+def is_signup_allowed():
+    """Whether new accounts can be created (the very first account always can)"""
+    return (get_setting("ALLOW_SIGNUP", "true") or "").lower() not in ("0", "false", "no", "off")
+
+
+def get_signup_code():
+    """Invite code that new accounts must enter; unset means anyone can sign up"""
+    return get_setting("SIGNUP_CODE")
+
+
+def get_app_url():
+    """Public address of the app for links in emails (e.g. https://example.com); unset uses the request's address"""
+    return (get_setting("APP_URL") or "").rstrip("/") or None
 
 
 def get_composio_api_key():

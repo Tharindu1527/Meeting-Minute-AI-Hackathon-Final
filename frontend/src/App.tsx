@@ -1,18 +1,23 @@
-import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { NotebookPen } from "lucide-react";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router";
+import { CommandPaletteProvider } from "./components/CommandPalette";
 import { Layout } from "./components/Layout";
 import { Toaster } from "./components/Toaster";
-import { ApiError, getToken, setToken, setUnauthorizedHandler } from "./lib/api";
+import { ApiError } from "./lib/api";
+import { AuthProvider, useAuth } from "./lib/auth";
 import { ModelProvider, useStatus } from "./lib/hooks";
 import { EASE } from "./lib/motion";
+import { ThemeProvider } from "./lib/theme";
 import type { AppStatus } from "./lib/types";
+import { Account } from "./pages/Account";
 import { ActionItems } from "./pages/ActionItems";
+import { AuthRoutes } from "./pages/Auth";
 import { Chat } from "./pages/Chat";
 import { FactCheck } from "./pages/FactCheck";
-import { Login, ServerUnreachable, SetupRequired } from "./pages/Gate";
+import { ServerUnreachable, SetupRequired } from "./pages/Gate";
 import { Listen } from "./pages/Listen";
 import { MeetingDetail } from "./pages/MeetingDetail";
 import { Meetings } from "./pages/Meetings";
@@ -66,6 +71,7 @@ function AnimatedRoutes({ status }: { status: AppStatus }) {
           <Route path="/chat" element={<Chat status={status} />} />
           <Route path="/listen" element={<Listen status={status} />} />
           <Route path="/fact-check" element={<FactCheck />} />
+          <Route path="/account" element={<Account />} />
           <Route path="*" element={<Navigate to="/meetings" replace />} />
         </Routes>
       </motion.div>
@@ -75,37 +81,23 @@ function AnimatedRoutes({ status }: { status: AppStatus }) {
 
 function Shell() {
   const status = useStatus();
-  const client = useQueryClient();
-  const [signedIn, setSignedIn] = useState(Boolean(getToken()));
+  const auth = useAuth();
 
-  useEffect(() => {
-    setUnauthorizedHandler(() => {
-      setSignedIn(false);
-      client.clear();
-    });
-    return () => setUnauthorizedHandler(null);
-  }, [client]);
-
-  if (status.isPending) return <Splash />;
+  if (status.isPending || auth.checking) return <Splash />;
   if (status.isError) return <ServerUnreachable message={status.error.message} onRetry={() => status.refetch()} />;
 
   const s = status.data;
   if (s.missing_config.length) return <SetupRequired status={s} />;
-  if (s.auth_required && !signedIn) return <Login onSignedIn={() => setSignedIn(true)} />;
-
-  const signOut = s.auth_required
-    ? () => {
-        setToken(null);
-        client.clear();
-        setSignedIn(false);
-      }
-    : undefined;
+  if (auth.error) return <ServerUnreachable message={auth.error.message} onRetry={auth.retry} />;
+  if (!auth.user) return <AuthRoutes status={s} />;
 
   return (
     <ModelProvider status={s}>
-      <Layout status={s} onSignOut={signOut}>
-        <AnimatedRoutes status={s} />
-      </Layout>
+      <CommandPaletteProvider>
+        <Layout status={s}>
+          <AnimatedRoutes status={s} />
+        </Layout>
+      </CommandPaletteProvider>
     </ModelProvider>
   );
 }
@@ -114,11 +106,15 @@ export default function App() {
   return (
     <MotionConfig reducedMotion="user">
       <QueryClientProvider client={queryClient}>
-        <Toaster>
-          <BrowserRouter>
-            <Shell />
-          </BrowserRouter>
-        </Toaster>
+        <ThemeProvider>
+          <Toaster>
+            <BrowserRouter>
+              <AuthProvider>
+                <Shell />
+              </AuthProvider>
+            </BrowserRouter>
+          </Toaster>
+        </ThemeProvider>
       </QueryClientProvider>
     </MotionConfig>
   );

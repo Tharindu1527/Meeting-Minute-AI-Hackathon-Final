@@ -1,4 +1,4 @@
-import { FilePlus2, Files, Headphones, ListChecks, LogOut, Menu, MessagesSquare, NotebookPen, ShieldCheck, X, type LucideIcon } from "lucide-react";
+import { FilePlus2, Files, Headphones, ListChecks, Menu, MessagesSquare, NotebookPen, Search, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState, type ReactNode } from "react";
 import { NavLink } from "react-router";
@@ -6,6 +6,8 @@ import { cx } from "../lib/format";
 import { useModel } from "../lib/hooks";
 import { EASE } from "../lib/motion";
 import type { AppStatus } from "../lib/types";
+import { SHORTCUT_LABEL, useCommandPalette } from "./CommandPalette";
+import { UserMenu } from "./UserMenu";
 
 const NAV: { to: string; label: string; icon: LucideIcon }[] = [
   { to: "/new", label: "New meeting", icon: FilePlus2 },
@@ -37,12 +39,31 @@ export function Logo() {
   );
 }
 
-function Sidebar({ status, idPrefix, onNavigate, onSignOut }: { status: AppStatus; idPrefix: string; onNavigate?: () => void; onSignOut?: () => void }) {
+function SearchButton({ onNavigate }: { onNavigate?: () => void }) {
+  const openPalette = useCommandPalette();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        onNavigate?.();
+        openPalette();
+      }}
+      className="group flex w-full items-center gap-2.5 rounded-xl border border-line bg-card/70 px-3 py-2 text-sm whitespace-nowrap text-subtle shadow-card transition duration-200 hover:border-brand/30 hover:text-ink"
+    >
+      <Search className="size-4 transition-transform duration-200 group-hover:scale-110 group-hover:text-brand" />
+      Search…
+      <kbd className="ml-auto rounded-md border border-line bg-sunken px-1.5 py-0.5 text-[10px] font-semibold">{SHORTCUT_LABEL}</kbd>
+    </button>
+  );
+}
+
+function Sidebar({ status, idPrefix, onNavigate }: { status: AppStatus; idPrefix: string; onNavigate?: () => void }) {
   const { model, setModel } = useModel();
   return (
-    <div className="flex h-full flex-col gap-7 p-4">
-      <div className="pt-1">
+    <div className="flex h-full flex-col gap-6 p-4">
+      <div className="space-y-5 pt-1">
         <Logo />
+        <SearchButton onNavigate={onNavigate} />
       </div>
 
       <nav className="flex flex-col gap-0.5" aria-label="Main">
@@ -108,36 +129,20 @@ function Sidebar({ status, idPrefix, onNavigate, onSignOut }: { status: AppStatu
               );
             })}
           </ul>
-          {!status.auth_required && (
-            <p className="mt-3 border-t border-line pt-3 text-[11px] leading-relaxed text-subtle">
-              No password set: anyone with the link can open this app. Set APP_PASSWORD to protect it.
-            </p>
-          )}
         </div>
 
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[11px] text-subtle">Version {status.version}</span>
-          {onSignOut && (
-            <button
-              type="button"
-              onClick={onSignOut}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-subtle transition hover:bg-sunken hover:text-ink"
-            >
-              <LogOut className="size-3.5" /> Sign out
-            </button>
-          )}
-        </div>
+        <UserMenu version={status.version} onNavigate={onNavigate} />
       </div>
     </div>
   );
 }
 
-export function Layout({ status, onSignOut, children }: { status: AppStatus; onSignOut?: () => void; children: ReactNode }) {
+export function Layout({ status, children }: { status: AppStatus; children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="flex min-h-screen">
       <aside className="glass sticky top-0 hidden h-screen w-[268px] shrink-0 overflow-y-auto border-r border-line md:block">
-        <Sidebar status={status} idPrefix="desktop" onSignOut={onSignOut} />
+        <Sidebar status={status} idPrefix="desktop" />
       </aside>
 
       <AnimatePresence>
@@ -165,7 +170,7 @@ export function Layout({ status, onSignOut, children }: { status: AppStatus; onS
               >
                 <X className="size-5" />
               </button>
-              <Sidebar status={status} idPrefix="mobile" onNavigate={() => setMenuOpen(false)} onSignOut={onSignOut} />
+              <Sidebar status={status} idPrefix="mobile" onNavigate={() => setMenuOpen(false)} />
             </motion.aside>
           </div>
         )}

@@ -11,6 +11,7 @@ export function ConfirmDialog({
   children,
   confirmLabel,
   loading = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -19,6 +20,8 @@ export function ConfirmDialog({
   children?: ReactNode;
   confirmLabel: string;
   loading?: boolean;
+  /** Keep the confirm button disabled (e.g. until a password is entered) */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -69,7 +72,7 @@ export function ConfirmDialog({
               <Button ref={cancelButton} onClick={onCancel} disabled={loading}>
                 Cancel
               </Button>
-              <Button variant="danger" loading={loading} onClick={onConfirm}>
+              <Button variant="danger" loading={loading} disabled={confirmDisabled} onClick={onConfirm}>
                 {confirmLabel}
               </Button>
             </div>

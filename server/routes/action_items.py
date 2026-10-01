@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from database import mongodb
 from models.minutes import Priority, Status
+from server.auth import CurrentUser, user_id
 
 router = APIRouter(tags=["action items"])
 
@@ -20,11 +21,11 @@ def _as_date(value):
 
 
 @router.get("/action-items")
-def list_action_items():
-    """Every action item with its meeting, flagged overdue when past due and not done"""
+def list_action_items(user: CurrentUser):
+    """Every action item in the user's meetings, flagged overdue when past due and not done"""
     today = date.today()
     items = []
-    for item in mongodb.list_action_items():
+    for item in mongodb.list_action_items(user_id(user)):
         due = _as_date(item.get("due_date"))
         items.append(dict(item, overdue=bool(due and due < today and item.get("status") != "Done")))
     return items
@@ -38,7 +39,7 @@ class ActionItemUpdate(BaseModel):
 
 
 @router.patch("/meetings/{meeting_id}/action-items/{item_id}")
-def update_action_item(meeting_id: str, item_id: str, body: ActionItemUpdate):
+def update_action_item(meeting_id: str, item_id: str, body: ActionItemUpdate, user: CurrentUser):
     """Update only the fields sent; send null to clear owner or due date"""
     fields = body.model_dump(exclude_unset=True)
     if not fields:
@@ -50,6 +51,6 @@ def update_action_item(meeting_id: str, item_id: str, body: ActionItemUpdate):
     for required in ("priority", "status"):
         if required in fields and fields[required] is None:
             raise HTTPException(status_code=400, detail=f"{required} cannot be empty.")
-    if not mongodb.update_action_item(meeting_id, item_id, fields):
+    if not mongodb.update_action_item(meeting_id, user_id(user), item_id, fields):
         raise HTTPException(status_code=404, detail="Action item not found")
     return {"updated": fields}

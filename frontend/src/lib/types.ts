@@ -161,9 +161,32 @@ export interface ConfigItem {
   purpose: string;
 }
 
+export interface AuthOptions {
+  /** New accounts can be created (the first account always can) */
+  signup_open: boolean;
+  /** New accounts need the invite code (SIGNUP_CODE) */
+  invite_code_required: boolean;
+  /** Email is configured, so "forgot password" can send reset links */
+  password_reset: boolean;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  created_at: string;
+}
+
+export interface Session {
+  token: string;
+  /** Unix seconds */
+  expires_at: number;
+  user: User;
+}
+
 export interface AppStatus {
   version: string;
-  auth_required: boolean;
+  auth: AuthOptions;
   missing_config: ConfigItem[];
   optional_config: ConfigItem[];
   services: {

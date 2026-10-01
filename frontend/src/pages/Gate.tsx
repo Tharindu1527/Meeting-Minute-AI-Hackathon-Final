@@ -1,9 +1,7 @@
-import { useMutation } from "@tanstack/react-query";
-import { ChevronDown, Eye, EyeOff, KeyRound, NotebookPen, RefreshCw, Server, Settings2 } from "lucide-react";
+import { ChevronDown, RefreshCw, Server, Settings2 } from "lucide-react";
 import { motion } from "motion/react";
 import { useState, type ReactNode } from "react";
-import { Alert, Button, IconTile, inputClass } from "../components/ui";
-import { api, setToken } from "../lib/api";
+import { Button, IconTile } from "../components/ui";
 import { Collapse, EASE } from "../lib/motion";
 import type { AppStatus } from "../lib/types";
 
@@ -27,69 +25,6 @@ function Centered({ children, className = "max-w-sm" }: { children: ReactNode; c
         {children}
       </motion.div>
     </div>
-  );
-}
-
-export function Login({ onSignedIn }: { onSignedIn: () => void }) {
-  const [password, setPassword] = useState("");
-  const [visible, setVisible] = useState(false);
-  const login = useMutation({
-    mutationFn: () => api.login(password),
-    onSuccess: ({ token }) => {
-      setToken(token);
-      onSignedIn();
-    },
-  });
-  return (
-    <Centered>
-      <div className="mb-7 text-center">
-        <motion.div
-          initial={{ scale: 0.6, rotate: -12, opacity: 0 }}
-          animate={{ scale: 1, rotate: 0, opacity: 1 }}
-          transition={{ type: "spring", stiffness: 260, damping: 18, delay: 0.1 }}
-          className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-brand-gradient text-white shadow-glow"
-        >
-          <NotebookPen className="size-6" />
-        </motion.div>
-        <h1 className="mt-4 text-xl font-semibold tracking-tight">Welcome back</h1>
-        <p className="mt-1 text-sm text-subtle">Enter the app password to open Meeting Minutes.</p>
-      </div>
-      <motion.form
-        animate={login.isError ? { x: [0, -8, 8, -5, 5, 0] } : { x: 0 }}
-        transition={{ duration: 0.4 }}
-        className="space-y-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          login.mutate();
-        }}
-      >
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium">Password</span>
-          <span className="relative block">
-            <input
-              type={visible ? "text" : "password"}
-              autoFocus
-              autoComplete="current-password"
-              className={`${inputClass} pr-11`}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-            <button
-              type="button"
-              onClick={() => setVisible(!visible)}
-              aria-label={visible ? "Hide password" : "Show password"}
-              className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-subtle transition hover:text-ink"
-            >
-              {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-            </button>
-          </span>
-        </label>
-        {login.isError && <Alert tone="error">{login.error.message}</Alert>}
-        <Button type="submit" variant="primary" size="lg" icon={KeyRound} className="w-full" loading={login.isPending} disabled={!password}>
-          Sign in
-        </Button>
-      </motion.form>
-    </Centered>
   );
 }
 

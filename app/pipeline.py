@@ -63,7 +63,8 @@ def read_transcript(source, *, file_path=None, filename=None, data=None, url=Non
     return dict(parsed, language=None, duration_seconds=None)
 
 
-def generate_meeting(title, meeting_date, source, *, options, model=None, progress=None, cleanup_path=None, **source_args):
+def generate_meeting(title, meeting_date, source, *, owner_id, options, model=None, progress=None, cleanup_path=None,
+                     **source_args):
     """
     Produce, save and index the minutes for one meeting
 
@@ -71,6 +72,7 @@ def generate_meeting(title, meeting_date, source, *, options, model=None, progre
         title: Meeting title
         meeting_date: datetime.date
         source: See read_transcript
+        owner_id: The user the meeting belongs to
         options: {"fact_check", "research", "languages", "speakers_expected", "detect_language", "redact_pii"}
         model: Gemini model for the agents
         progress: Optional callback(message, done=None, total=None)
@@ -117,7 +119,7 @@ def generate_meeting(title, meeting_date, source, *, options, model=None, progre
         transcript=dict(transcript, truncated=truncated),
         warnings=warnings,
     )
-    meeting_id = mongodb.create_meeting(meeting)
+    meeting_id = mongodb.create_meeting(meeting, owner_id)
     report("Saved the minutes")
 
     if qdrant.is_configured():
@@ -127,7 +129,7 @@ def generate_meeting(title, meeting_date, source, *, options, model=None, progre
             report(f"Indexed {count} transcript passage{'s' if count != 1 else ''} for search")
         except Exception as e:  # search indexing is optional; the minutes are already saved
             logger.exception("Indexing failed")
-            mongodb.update_meeting(meeting_id, {"warnings": warnings + [
+            mongodb.update_meeting(meeting_id, owner_id, {"warnings": warnings + [
                 f"The transcript could not be indexed for chat search: {e}"]})
     return meeting_id
 

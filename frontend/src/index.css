@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Dark mode follows the data-theme attribute (set from the user's choice or the system), not just the media query */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* Design tokens are CSS variables so light and dark mode share one set of utility
    classes (bg-canvas, bg-card, text-ink, text-subtle, border-line, bg-brand, ...). */
 @theme inline {
@@ -52,32 +55,31 @@
   color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --canvas: #0a0c12;
-    --card: #11141c;
-    --sunken: #171b25;
-    --line: #232838;
-    --ink: #eceef6;
-    --subtle: #98a0b5;
-    --brand: #8d8dff;
-    --brand-2: #c08cff;
-    --brand-ink: #0a0c12;
-    --brand-soft: #1c1e3d;
-    --brand-glow: rgb(141 141 255 / 0.35);
-    --good: #4ade80;
-    --good-soft: #10261a;
-    --warn: #fbbf24;
-    --warn-soft: #2a220f;
-    --bad: #fb8a5c;
-    --bad-soft: #2e1a13;
-    --glow-1: rgb(141 141 255 / 0.10);
-    --glow-2: rgb(192 140 255 / 0.07);
-    --sh-card: 0 1px 2px rgb(0 0 0 / 0.4);
-    --sh-lift: 0 22px 44px -20px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(141 141 255 / 0.12);
-    --sh-pop: 0 24px 64px -12px rgb(0 0 0 / 0.7);
-    color-scheme: dark;
-  }
+/* index.html sets data-theme before the first paint; lib/theme.tsx keeps it in sync */
+:root[data-theme="dark"] {
+  --canvas: #0a0c12;
+  --card: #11141c;
+  --sunken: #171b25;
+  --line: #232838;
+  --ink: #eceef6;
+  --subtle: #98a0b5;
+  --brand: #8d8dff;
+  --brand-2: #c08cff;
+  --brand-ink: #0a0c12;
+  --brand-soft: #1c1e3d;
+  --brand-glow: rgb(141 141 255 / 0.35);
+  --good: #4ade80;
+  --good-soft: #10261a;
+  --warn: #fbbf24;
+  --warn-soft: #2a220f;
+  --bad: #fb8a5c;
+  --bad-soft: #2e1a13;
+  --glow-1: rgb(141 141 255 / 0.10);
+  --glow-2: rgb(192 140 255 / 0.07);
+  --sh-card: 0 1px 2px rgb(0 0 0 / 0.4);
+  --sh-lift: 0 22px 44px -20px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(141 141 255 / 0.12);
+  --sh-pop: 0 24px 64px -12px rgb(0 0 0 / 0.7);
+  color-scheme: dark;
 }
 
 html,
@@ -169,6 +171,13 @@ body {
   100% {
     transform: translateX(100%);
   }
+}
+
+/* Theme switch: the new theme is revealed by a growing circle (animated from lib/theme.tsx) */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
 }
 
 @media (prefers-reduced-motion: reduce) {

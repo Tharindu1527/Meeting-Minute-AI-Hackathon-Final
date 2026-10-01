@@ -47,6 +47,10 @@ def active_provider(settings=None):
     return None
 
 
+def is_valid_email(address):
+    return bool(_EMAIL_RE.match(address or ""))
+
+
 def parse_recipients(raw):
     """
     Split a comma/newline separated list of addresses
@@ -71,14 +75,21 @@ def send_minutes_email(meeting, recipients):
     Returns:
         list: [{"recipient", "ok", "error"}] — one entry per recipient
     """
+    subject = f"Meeting minutes: {meeting.get('title', 'Untitled meeting')}"
+    return send_email(recipients, subject, minutes_to_html(meeting), minutes_to_markdown(meeting))
+
+
+def send_email(recipients, subject, html_body, text_body):
+    """
+    Send one message to each recipient with the configured provider
+
+    Returns:
+        list: [{"recipient", "ok", "error"}] — one entry per recipient
+    """
     settings = get_email_settings()
     provider = active_provider(settings)
     if provider is None:
         return [{"recipient": r, "ok": False, "error": "Email is not configured"} for r in recipients]
-
-    subject = f"Meeting minutes: {meeting.get('title', 'Untitled meeting')}"
-    html_body = minutes_to_html(meeting)
-    text_body = minutes_to_markdown(meeting)
 
     if provider == "smtp":
         return _send_smtp(settings, recipients, subject, html_body, text_body)

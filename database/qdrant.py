@@ -102,24 +102,26 @@ def index_meeting(meeting_id, title, chunks):
     return len(points)
 
 
-def search(query, meeting_id=None, limit=6):
+def search(query, meeting_ids, limit=6):
     """
     Semantic search over transcript chunks
 
     Args:
         query: Question or search text
-        meeting_id: Restrict to one meeting (None searches all meetings)
+        meeting_ids: The meetings to search (always the asking user's own meetings)
         limit: Maximum number of chunks
 
     Returns:
         list: Chunk payload dicts with an added "score"
     """
+    if not meeting_ids:
+        return []
     ensure_collection()
     vector = embed([query])[0]
     response = get_client().query_points(
         collection_name=get_qdrant_collection(),
         query=vector,
-        query_filter=_meeting_filter(meeting_id) if meeting_id else None,
+        query_filter=models.Filter(must=[models.FieldCondition(key="meeting_id", match=models.MatchAny(any=list(meeting_ids)))]),
         limit=limit,
         with_payload=True,
     )

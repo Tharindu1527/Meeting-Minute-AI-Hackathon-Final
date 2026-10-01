@@ -6,6 +6,17 @@
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>" />
     <title>Meeting Minutes AI</title>
+    <script>
+      // Apply the saved theme before the app loads, so the page never flashes the wrong colours
+      (function () {
+        var choice = "system";
+        try {
+          choice = localStorage.getItem("meeting-minutes-theme") || "system";
+        } catch (e) {}
+        var dark = choice === "dark" || (choice !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

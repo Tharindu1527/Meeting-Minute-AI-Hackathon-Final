@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { Alert, Badge, Button, EmptyState, PageHeader, Skeleton, Stat, inputClass } from "../components/ui";
 import { api } from "../lib/api";
+import { firstName, useUser } from "../lib/auth";
 import { plural } from "../lib/format";
 import { EASE } from "../lib/motion";
 import type { MeetingSummary } from "../lib/types";
@@ -73,7 +74,13 @@ function ListSkeleton() {
   );
 }
 
+function greeting() {
+  const hour = new Date().getHours();
+  return hour < 5 ? "Working late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+}
+
 export function Meetings() {
+  const user = useUser();
   const navigate = useNavigate();
   const meetings = useQuery({ queryKey: ["meetings"], queryFn: api.meetings });
   const [search, setSearch] = useState("");
@@ -85,9 +92,13 @@ export function Meetings() {
   return (
     <div>
       <PageHeader
-        eyebrow="Workspace"
-        title="Meetings"
-        description="Every meeting you've turned into minutes, newest first."
+        eyebrow="Your meetings"
+        title={
+          <>
+            {greeting()}, <span className="text-brand-gradient">{firstName(user)}</span>
+          </>
+        }
+        description="Every meeting you've turned into minutes, newest first. Only you can see them."
         actions={
           <Button variant="primary" icon={FilePlus2} onClick={() => navigate("/new")}>
             New meeting

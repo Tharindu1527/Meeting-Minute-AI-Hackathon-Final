@@ -19,6 +19,7 @@ from app.pipeline import InputError, generate_meeting
 from crews import LANGUAGES
 from database import mongodb, qdrant
 from models import MeetingMinutes
+from server.auth import CurrentUser, user_id
 from server.jobs import jobs
 from utils.transcript import parse_transcript_file
 
@@ -33,8 +34,9 @@ EXPORTS = {
 }
 
 
-def load_meeting(meeting_id):
-    meeting = mongodb.get_meeting(meeting_id)
+def load_meeting(meeting_id, user):
+    """The user's meeting, or 404 (also for other users' meetings, so their ids reveal nothing)"""
+    meeting = mongodb.get_meeting(meeting_id, user_id(user))
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
     return meeting
@@ -46,12 +48,13 @@ def file_slug(meeting):
 
 
 @router.get("/meetings")
-def list_meetings():
-    return mongodb.list_meetings()
+def list_meetings(user: CurrentUser):
+    return mongodb.list_meetings(user_id(user))
 
 
 @router.post("/meetings", status_code=202)
 def create_meeting(
+    user: CurrentUser,
     title: str = Form(...),
     meeting_date: date = Form(...),
     source: str = Form(...),
@@ -107,38 +110,38 @@ def create_meeting(
     }
 
     def run(job):
-        meeting_id = generate_meeting(title.strip(), meeting_date, source, options=options, model=model or None,
-                                      progress=job.report, cleanup_path=cleanup_path, **source_args)
+        meeting_id = generate_meeting(title.strip(), meeting_date, source, owner_id=user_id(user), options=options,
+                                      model=model or None, progress=job.report, cleanup_path=cleanup_path, **source_args)
         return {"meeting_id": meeting_id}
 
-    job = jobs.start("generate", run)
+    job = jobs.start("generate", user_id(user), run)
     return {"job_id": job.id}
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str):
-    job = jobs.get(job_id)
+def get_job(job_id: str, user: CurrentUser):
+    job = jobs.get(job_id, user_id(user))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found (it may have expired)")
     return job.to_dict()
 
 
 @router.get("/meetings/{meeting_id}")
-def get_meeting(meeting_id: str):
-    return load_meeting(meeting_id)
+def get_meeting(meeting_id: str, user: CurrentUser):
+    return load_meeting(meeting_id, user)
 
 
 @router.put("/meetings/{meeting_id}/minutes")
-def update_minutes(meeting_id: str, minutes: MeetingMinutes):
-    load_meeting(meeting_id)
-    mongodb.update_meeting(meeting_id, {"minutes": minutes.model_dump()})
-    return load_meeting(meeting_id)
+def update_minutes(meeting_id: str, minutes: MeetingMinutes, user: CurrentUser):
+    load_meeting(meeting_id, user)
+    mongodb.update_meeting(meeting_id, user_id(user), {"minutes": minutes.model_dump()})
+    return load_meeting(meeting_id, user)
 
 
 @router.delete("/meetings/{meeting_id}")
-def delete_meeting(meeting_id: str):
-    load_meeting(meeting_id)
-    mongodb.delete_meeting(meeting_id)
+def delete_meeting(meeting_id: str, user: CurrentUser):
+    load_meeting(meeting_id, user)
+    mongodb.delete_meeting(meeting_id, user_id(user))
     warning = None
     if qdrant.is_configured():
         try:
@@ -150,10 +153,10 @@ def delete_meeting(meeting_id: str):
 
 
 @router.get("/meetings/{meeting_id}/export/{fmt}")
-def export_meeting(meeting_id: str, fmt: str):
+def export_meeting(meeting_id: str, fmt: str, user: CurrentUser):
     if fmt not in EXPORTS:
         raise HTTPException(status_code=400, detail=f"Format must be one of: {', '.join(EXPORTS)}")
-    meeting = load_meeting(meeting_id)
+    meeting = load_meeting(meeting_id, user)
     media_type, render = EXPORTS[fmt]
     content = render(meeting)
     return Response(
@@ -168,8 +171,8 @@ class EmailRequest(BaseModel):
 
 
 @router.post("/meetings/{meeting_id}/email")
-def email_meeting(meeting_id: str, body: EmailRequest):
-    meeting = load_meeting(meeting_id)
+def email_meeting(meeting_id: str, body: EmailRequest, user: CurrentUser):
+    meeting = load_meeting(meeting_id, user)
     if active_provider() is None:
         raise HTTPException(status_code=400, detail="Email isn't configured. Add SMTP settings or COMPOSIO_API_KEY to .env.")
     recipients, invalid = parse_recipients(body.recipients)

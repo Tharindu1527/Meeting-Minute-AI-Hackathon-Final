@@ -49,21 +49,20 @@ def keyword_search(question, meetings, limit=MAX_EXCERPTS):
     return [chunk for _, chunk in scored[:limit]]
 
 
-def retrieve_excerpts(question, meetings, meeting_id=None):
+def retrieve_excerpts(question, meetings):
     """
     Find transcript excerpts relevant to the question
 
     Args:
         question: The user's question
-        meetings: Full meeting dicts in scope (used for the keyword fallback)
-        meeting_id: Restrict semantic search to one meeting, or None for all
+        meetings: Full meeting dicts in scope; only these meetings are searched
 
     Returns:
         list: [{"title", "text", "start_ms", ...}]
     """
     if qdrant.is_configured():
         try:
-            return qdrant.search(question, meeting_id=meeting_id, limit=MAX_EXCERPTS)
+            return qdrant.search(question, [m["id"] for m in meetings if m.get("id")], limit=MAX_EXCERPTS)
         except Exception as e:  # fall back rather than failing the chat
             logger.warning("Semantic search failed, using keyword search: %s", e)
     return keyword_search(question, meetings)
@@ -92,7 +91,7 @@ def answer_question(question, history, meetings, meeting_id=None, model=None):
     Returns:
         dict: {"answer": str, "sources": list of excerpts}
     """
-    excerpts = retrieve_excerpts(question, meetings, meeting_id)
+    excerpts = retrieve_excerpts(question, meetings)
 
     if meeting_id and meetings:
         minutes_context = minutes_to_markdown(meetings[0])

@@ -15,8 +15,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.pipeline import InputError
 from database.mongodb import DatabaseError
-from server.auth import require_auth
-from server.routes import action_items, assistant, fact_check, meetings, status
+from server.auth import current_user
+from server.routes import action_items, assistant, auth, fact_check, meetings, status
 from utils.config import is_debug
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -35,10 +35,12 @@ def create_app():
     def input_error(_request: Request, exc: InputError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
-    # Status and sign-in are public; everything else needs a token when APP_PASSWORD is set
+    # Status and the account routes are public (account routes check sign-in themselves where needed);
+    # everything else needs a signed-in user, and each route only sees that user's meetings
     app.include_router(status.router, prefix="/api")
+    app.include_router(auth.router, prefix="/api")
     for module in (meetings, action_items, assistant, fact_check):
-        app.include_router(module.router, prefix="/api", dependencies=[Depends(require_auth)])
+        app.include_router(module.router, prefix="/api", dependencies=[Depends(current_user)])
 
     if FRONTEND_DIST.is_dir():
         _serve_frontend(app)

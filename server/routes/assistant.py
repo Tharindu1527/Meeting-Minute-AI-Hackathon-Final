@@ -12,6 +12,7 @@ from app.chatbot import answer_question
 from app.export import minutes_to_speech_script
 from crews.base_crew import describe_failure
 from database import mongodb
+from server.auth import CurrentUser, user_id
 from server.routes.meetings import load_meeting
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,12 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/chat")
-def chat(body: ChatRequest):
+def chat(body: ChatRequest, user: CurrentUser):
     if body.meeting_id:
-        in_scope = [load_meeting(body.meeting_id)]
+        in_scope = [load_meeting(body.meeting_id, user)]
     else:
-        in_scope = [mongodb.get_meeting(m["id"]) for m in mongodb.list_meetings()[:MAX_MEETINGS_IN_SCOPE]]
+        owner = user_id(user)
+        in_scope = [mongodb.get_meeting(m["id"], owner) for m in mongodb.list_meetings(owner)[:MAX_MEETINGS_IN_SCOPE]]
         in_scope = [m for m in in_scope if m]
     if not in_scope:
         raise HTTPException(status_code=400, detail="There are no meetings to ask about yet.")
@@ -79,8 +81,8 @@ def _script(meeting, language):
 
 
 @router.get("/meetings/{meeting_id}/speech-script")
-def speech_script(meeting_id: str, language: Optional[str] = None):
-    return {"script": _script(load_meeting(meeting_id), language)}
+def speech_script(meeting_id: str, user: CurrentUser, language: Optional[str] = None):
+    return {"script": _script(load_meeting(meeting_id, user), language)}
 
 
 class MeetingSpeechRequest(BaseModel):
@@ -89,5 +91,5 @@ class MeetingSpeechRequest(BaseModel):
 
 
 @router.post("/meetings/{meeting_id}/speech")
-def meeting_speech(meeting_id: str, body: MeetingSpeechRequest):
-    return _wav(_script(load_meeting(meeting_id), body.language), body.voice)
+def meeting_speech(meeting_id: str, body: MeetingSpeechRequest, user: CurrentUser):
+    return _wav(_script(load_meeting(meeting_id, user), body.language), body.voice)
